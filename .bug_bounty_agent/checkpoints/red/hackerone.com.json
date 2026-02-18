@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-02-18T14:59:58.402681+00:00",
+  "operator_id": "red",
+  "project_key": "hackerone.com",
+  "program_url": "https://hackerone.com",
+  "mode": "balanced",
+  "summary": "Project intake complete for hackerone.com. Collected candidate scope/policy/docs, prior bug context, social signals, and domains.",
+  "suggestions": [
+    "Manually locate scope page/assets tab from the program portal.",
+    "Manually locate policy/guidelines page from the program portal.",
+    "Confirm policy and scope URLs before any active testing.",
+    "Create in-scope and out-of-scope lists from verified sources.",
+    "Map high-value assets (auth, APIs, uploads, payment, admin).",
+    "Launch recon pipeline only against approved assets.",
+    "Track findings in reproducible checklist format."
+  ],
+  "completed": [
+    "Program URL captured",
+    "Initial web context scan executed"
+  ],
+  "pending": [
+    "Policy links not discovered yet",
+    "Scope links not discovered yet",
+    "Technical documentation links not discovered yet",
+    "Previous bug/write-up context not discovered yet",
+    "Public social discussion links not discovered yet",
+    "Candidate in-scope domains not extracted yet",
+    "Validate all discovered links manually",
+    "Build definitive in-scope asset list",
+    "Start recon and testing against validated in-scope assets",
+    "Collect evidence and draft report templates"
+  ],
+  "sources": [
+    "https://hackerone.com"
+  ]
+}

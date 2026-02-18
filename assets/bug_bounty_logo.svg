@@ -1,0 +1,32 @@
+<svg width="1400" height="520" viewBox="0 0 1400 520" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070b12"/>
+      <stop offset="100%" stop-color="#101827"/>
+    </linearGradient>
+    <linearGradient id="title" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ef4444"/>
+      <stop offset="50%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#facc15"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1400" height="520" rx="24" fill="url(#bg)"/>
+  <rect x="20" y="20" width="1360" height="480" rx="18" fill="none" stroke="#1f2937" stroke-width="3"/>
+
+  <g transform="translate(95 100)">
+    <polygon points="120,0 235,60 235,190 120,250 5,190 5,60" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+    <polygon points="120,22 214,72 214,178 120,228 26,178 26,72" fill="none" stroke="#ef4444" stroke-width="4"/>
+    <text x="120" y="118" text-anchor="middle" fill="#f8fafc" font-family="'Courier New', monospace" font-size="46" font-weight="700">BB</text>
+    <text x="120" y="158" text-anchor="middle" fill="#22d3ee" font-family="'Courier New', monospace" font-size="24">AGENT</text>
+    <rect x="24" y="270" width="192" height="46" rx="10" fill="none" stroke="#22d3ee" stroke-width="3"/>
+    <text x="120" y="300" text-anchor="middle" fill="#22d3ee" font-family="'Courier New', monospace" font-size="24">./bug_bounty</text>
+  </g>
+
+  <g transform="translate(390 150)">
+    <text x="0" y="0" fill="url(#title)" font-size="122" font-family="'Impact', 'Arial Black', sans-serif" font-weight="900" letter-spacing="5">BUG BOUNTY</text>
+    <text x="0" y="92" fill="#f8fafc" font-size="88" font-family="'Impact', 'Arial Black', sans-serif" font-weight="900" letter-spacing="8">AGENT</text>
+    <text x="0" y="146" fill="#9ca3af" font-size="32" font-family="'Courier New', monospace" letter-spacing="2">THREAT OPS // AUTHORIZED OFFENSIVE SECURITY</text>
+    <text x="0" y="192" fill="#22d3ee" font-size="24" font-family="'Courier New', monospace">FAST TRIAGE | POLICY GUARDRAILS | EXECUTE OR MANUAL PATH</text>
+  </g>
+</svg>
