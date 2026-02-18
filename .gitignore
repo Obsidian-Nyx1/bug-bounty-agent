@@ -1,0 +1,10 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Agent runtime state
+.bug_bounty_agent/
+
+# Local environment files
+.env
+.env.*
