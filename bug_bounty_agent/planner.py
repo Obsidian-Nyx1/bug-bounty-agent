@@ -35,6 +35,16 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
     else:
         pending.append("Technical documentation links not discovered yet")
 
+    if discovery.tab_links:
+        completed.append("Program navigation tabs enumerated")
+    else:
+        pending.append("Program navigation tabs not discovered yet")
+
+    if discovery.downloaded_files:
+        completed.append("Downloadable program artifacts collected")
+    else:
+        pending.append("No downloadable artifacts found (CSV/Burp config)")
+
     if discovery.previous_bug_links:
         completed.append("Previous bug/write-up context discovered")
     else:
@@ -49,6 +59,16 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
         completed.append("Candidate in-scope domains extracted")
     else:
         pending.append("Candidate in-scope domains not extracted yet")
+
+    if discovery.in_scope_domains:
+        completed.append("In-scope domains parsed from program artifacts")
+    else:
+        pending.append("In-scope domains could not be parsed from artifacts")
+
+    if discovery.out_scope_domains:
+        completed.append("Out-of-scope domains parsed from program artifacts")
+    else:
+        pending.append("Out-of-scope domains could not be parsed from artifacts")
 
     pending.extend(
         [
@@ -66,6 +86,16 @@ def build_plan(discovery: DiscoveryData, ai_summary: str | None) -> Plan:
         f"Project intake complete for {discovery.project_key}. "
         "Collected candidate scope/policy/docs, prior bug context, social signals, and domains."
     )
+    if not (
+        discovery.candidate_policy_links
+        or discovery.candidate_scope_links
+        or discovery.downloaded_files
+        or discovery.in_scope_domains
+    ):
+        summary = (
+            f"Project intake for {discovery.project_key} finished, but could not find usable "
+            "scope/policy artifacts from accessible sources."
+        )
     if ai_summary:
         summary = f"{summary} AI model insight: {ai_summary}"
 

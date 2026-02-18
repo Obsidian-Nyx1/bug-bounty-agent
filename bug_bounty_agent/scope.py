@@ -52,6 +52,23 @@ def parse_scope_file(scope_file: Path | None) -> ScopeData:
     return ScopeData(in_scope=in_scope, out_scope=out_scope, raw_lines=lines)
 
 
+def merge_scope_sources(file_scope: ScopeData, discovered_in: list[str], discovered_out: list[str]) -> ScopeData:
+    in_scope = list(file_scope.in_scope)
+    out_scope = list(file_scope.out_scope)
+    for item in discovered_in:
+        low = item.lower()
+        if low not in in_scope:
+            in_scope.append(low)
+    for item in discovered_out:
+        low = item.lower()
+        if low not in out_scope:
+            out_scope.append(low)
+    raw = list(file_scope.raw_lines)
+    if discovered_in or discovered_out:
+        raw.append("# discovered_from_program_downloads")
+    return ScopeData(in_scope=in_scope, out_scope=out_scope, raw_lines=raw)
+
+
 def recommend_domain(
     project_url: str,
     candidates: list[str],
@@ -59,7 +76,7 @@ def recommend_domain(
 ) -> DomainRecommendation:
     project_host = (urlparse(project_url).hostname or "").lower()
     ordered = []
-    if project_host:
+    if project_host and project_host not in {"hackerone.com", "www.hackerone.com"}:
         ordered.append(project_host)
     for item in candidates:
         low = item.lower()

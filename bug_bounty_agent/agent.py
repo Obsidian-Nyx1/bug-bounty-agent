@@ -14,7 +14,13 @@ from bug_bounty_agent.discovery import discover_project_context
 from bug_bounty_agent.learning import LearningStore
 from bug_bounty_agent.planner import build_checklist, build_plan
 from bug_bounty_agent.report import ReportData, write_intake_report
-from bug_bounty_agent.scope import DomainRecommendation, ScopeData, parse_scope_file, recommend_domain
+from bug_bounty_agent.scope import (
+    DomainRecommendation,
+    ScopeData,
+    merge_scope_sources,
+    parse_scope_file,
+    recommend_domain,
+)
 
 
 @dataclass
@@ -123,7 +129,12 @@ class BugBountyAgent:
         ai_result = summarize_with_github_models(prompt)
         completed, pending = build_checklist(discovery)
         plan = build_plan(discovery, ai_result.summary)
-        scope_data = parse_scope_file(data.scope_file)
+        file_scope = parse_scope_file(data.scope_file)
+        scope_data = merge_scope_sources(
+            file_scope=file_scope,
+            discovered_in=discovery.in_scope_domains,
+            discovered_out=discovery.out_scope_domains,
+        )
         recommendation = recommend_domain(
             project_url=data.program_url,
             candidates=discovery.domain_candidates,
@@ -169,6 +180,12 @@ class BugBountyAgent:
             notes.append(f"Model responses: {ok_count}/{len(ai_result.runs)} successful.")
             sample_models = [run.model for run in ai_result.runs[:8]]
             notes.append(f"Models attempted: {', '.join(sample_models)}")
+        if not discovery.downloaded_files and not discovery.in_scope_domains:
+            notes.append(
+                "Could not find downloadable scope artifacts or parsed scope domains for this run."
+            )
+        if not discovery.candidate_policy_links and not discovery.candidate_scope_links:
+            notes.append("Could not find policy/scope links from accessible content in this run.")
         notes.append(
             "Step 2 recommendation generated from checklist/discovery + parsed scope patterns."
         )
