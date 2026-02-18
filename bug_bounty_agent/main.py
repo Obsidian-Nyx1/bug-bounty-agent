@@ -17,6 +17,11 @@ def parse_args() -> argparse.Namespace:
         description="Authorized bug bounty agent with execute-or-guide behavior.",
     )
     parser.add_argument("--program-url", help="HackerOne program URL", default=None)
+    parser.add_argument(
+        "--program-hint",
+        help="Program handle/title hint (useful when URL is generic like opportunities/all).",
+        default=None,
+    )
     parser.add_argument("--scope-file", help="Path to in-scope targets file", default=None)
     parser.add_argument("--policy-file", help="Path to program policy file", default=None)
     parser.add_argument(
@@ -46,11 +51,22 @@ def main() -> int:
     program_url = args.program_url
     if not program_url and not args.no_prompt:
         program_url = input("[Input] Paste project URL: ").strip()
+    program_hint = args.program_hint
+    if (
+        program_url
+        and "hackerone.com/opportunities" in program_url
+        and not program_hint
+        and not args.no_prompt
+    ):
+        program_hint = input(
+            "[Input] Paste project handle/title from upper-left program header: "
+        ).strip()
 
     agent = BugBountyAgent()
     result = agent.run(
         AgentInput(
             program_url=program_url or None,
+            program_hint=program_hint or None,
             scope_file=Path(args.scope_file) if args.scope_file else None,
             policy_file=Path(args.policy_file) if args.policy_file else None,
             mode=args.mode,

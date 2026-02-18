@@ -26,6 +26,7 @@ from bug_bounty_agent.scope import (
 @dataclass
 class AgentInput:
     program_url: str | None
+    program_hint: str | None
     scope_file: Path | None
     policy_file: Path | None
     mode: str
@@ -114,7 +115,7 @@ class BugBountyAgent:
                 scope_data=ScopeData(in_scope=[], out_scope=[], raw_lines=[]),
             )
 
-        discovery = discover_project_context(data.program_url)
+        discovery = discover_project_context(data.program_url, data.program_hint)
         memory = LearningStore(Path(".bug_bounty_agent/learning_memory.jsonl"))
         prior = memory.load_checkpoint(data.operator_id, discovery.project_key)
         prompt = discovery.as_prompt()
@@ -172,6 +173,13 @@ class BugBountyAgent:
             f"Respawn checkpoint saved: {checkpoint_path}",
             "Scope and policy findings are best-effort; verify before active testing.",
         ]
+        if data.program_hint:
+            notes.append(f"Program hint used: {data.program_hint}")
+        if "hackerone.com/opportunities" in data.program_url and not discovery.program_handle:
+            notes.append(
+                "Generic opportunities URL detected. Paste project handle/title via --program-hint "
+                "to resolve exact program tabs and downloads."
+            )
         if prior:
             notes.append("Previous checkpoint restored and used for planning.")
         notes.extend(ai_result.notes)

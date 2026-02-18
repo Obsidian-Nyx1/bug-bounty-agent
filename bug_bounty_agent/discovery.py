@@ -14,6 +14,16 @@ import time
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
+TAB_SUFFIXES = [
+    "",  # Program guidelines
+    "policy_scopes",  # Scope
+    "hacktivity",
+    "thanks",
+    "updates",
+    "collaborators",
+    "safe_harbor",
+]
+
 
 class _LinkParser(HTMLParser):
     def __init__(self) -> None:
@@ -305,9 +315,27 @@ def _extract_h1_handle(project_url: str) -> str | None:
         "settings",
         "directory",
         "programs",
+        "opportunities",
     }:
         return None
     return handle
+
+
+def _normalize_handle_hint(hint: str | None) -> str | None:
+    if not hint:
+        return None
+    raw = hint.strip().lower()
+    if not raw:
+        return None
+    # Accept full HackerOne URL as hint.
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        parts = [seg for seg in parsed.path.split("/") if seg]
+        if parts:
+            raw = parts[0].lower()
+    # Normalize spaces/symbols to handle-like token.
+    raw = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-")
+    return raw or None
 
 
 def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str]]:
@@ -370,9 +398,9 @@ def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str]]:
     return in_scope[:100], out_scope[:100]
 
 
-def discover_project_context(project_url: str) -> DiscoveryData:
+def discover_project_context(project_url: str, program_hint: str | None = None) -> DiscoveryData:
     parsed = urlparse(project_url)
-    handle = _extract_h1_handle(project_url)
+    handle = _extract_h1_handle(project_url) or _normalize_handle_hint(program_hint)
     project_key = handle or (parsed.netloc or project_url).replace("www.", "").strip("/")
     platform = "hackerone" if parsed.netloc.lower() == "hackerone.com" else parsed.netloc.lower()
 
@@ -396,14 +424,7 @@ def discover_project_context(project_url: str) -> DiscoveryData:
 
     if handle:
         base = f"https://hackerone.com/{handle}"
-        tab_links = [
-            base,
-            f"{base}/policy_scopes",
-            f"{base}/hacktivity",
-            f"{base}/thanks",
-            f"{base}/updates",
-            f"{base}/collaborators",
-        ]
+        tab_links = [base if not suf else f"{base}/{suf}" for suf in TAB_SUFFIXES]
         # Ensure policy/scope tab links are in candidates even when SPA hides link markup.
         for candidate in [base, f"{base}/policy_scopes"]:
             if candidate not in policy:
