@@ -66,7 +66,10 @@ class DiscoveryData:
     in_scope_domains: list[str]
     out_scope_domains: list[str]
     downloaded_files: list[str]
+    downloaded_artifact_reasons: list[str]
     tab_links: list[str]
+    allowed_scope_signals: list[str]
+    out_scope_signals: list[str]
     sources: list[str]
 
     def as_prompt(self) -> str:
@@ -79,6 +82,9 @@ class DiscoveryData:
             f"Domains in scope (parsed): {self.in_scope_domains}\n"
             f"Domains out of scope (parsed): {self.out_scope_domains}\n"
             f"Downloaded files: {self.downloaded_files}\n"
+            f"Downloaded artifact reasons: {self.downloaded_artifact_reasons}\n"
+            f"Allowed scope signals: {self.allowed_scope_signals}\n"
+            f"Out-of-scope signals: {self.out_scope_signals}\n"
             f"Previous bug links: {self.previous_bug_links}\n"
             f"Social/public discussions: {self.social_discussion_links}\n"
             "Create an actionable bug bounty plan with completed vs pending phases."
@@ -338,11 +344,13 @@ def _normalize_handle_hint(hint: str | None) -> str | None:
     return raw or None
 
 
-def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str]]:
+def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str], list[str], list[str]]:
     in_scope: list[str] = []
     out_scope: list[str] = []
+    allowed_signals: list[str] = []
+    blocked_signals: list[str] = []
     if not path.exists():
-        return in_scope, out_scope
+        return in_scope, out_scope, allowed_signals, blocked_signals
     try:
         with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -353,32 +361,47 @@ def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str]]:
                 eligible_bounty = (row.get("eligible_for_bounty") or "").strip().lower()
 
                 domains = _extract_domains_from_text(ident)
-                if not domains:
-                    continue
                 is_out = (
                     eligible_sub == "false"
                     or eligible_bounty == "false"
                     or "out of scope" in instruction
                     or "excluded" in instruction
                 )
+                if domains:
+                    signal_value = ", ".join(domains[:3])
+                else:
+                    signal_value = ident[:120] if ident else "unlabeled asset"
+                if is_out:
+                    blocked = f"{signal_value} (submission={eligible_sub or 'n/a'}, bounty={eligible_bounty or 'n/a'})"
+                    if blocked not in blocked_signals:
+                        blocked_signals.append(blocked)
+                else:
+                    allowed = f"{signal_value} (submission={eligible_sub or 'n/a'}, bounty={eligible_bounty or 'n/a'})"
+                    if allowed not in allowed_signals:
+                        allowed_signals.append(allowed)
+
+                if not domains:
+                    continue
                 target = out_scope if is_out else in_scope
                 for domain in domains:
                     if domain not in target:
                         target.append(domain)
     except Exception:
-        return in_scope, out_scope
-    return in_scope[:100], out_scope[:100]
+        return in_scope, out_scope, allowed_signals, blocked_signals
+    return in_scope[:100], out_scope[:100], allowed_signals[:50], blocked_signals[:50]
 
 
-def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str]]:
+def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str], list[str], list[str]]:
     in_scope: list[str] = []
     out_scope: list[str] = []
+    allowed_signals: list[str] = []
+    blocked_signals: list[str] = []
     if not path.exists():
-        return in_scope, out_scope
+        return in_scope, out_scope, allowed_signals, blocked_signals
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     except Exception:
-        return in_scope, out_scope
+        return in_scope, out_scope, allowed_signals, blocked_signals
     target = data.get("target", {}).get("scope", {})
     include = target.get("include", []) if isinstance(target, dict) else []
     exclude = target.get("exclude", []) if isinstance(target, dict) else []
@@ -386,16 +409,42 @@ def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str]]:
     for item in include if isinstance(include, list) else []:
         host = str(item.get("host", ""))
         domains = _extract_domains_from_text(host.replace("\\.", ".").replace("^", "").replace("$", ""))
+        if domains:
+            signal = f"{', '.join(domains[:3])} (Burp include)"
+            if signal not in allowed_signals:
+                allowed_signals.append(signal)
         for domain in domains:
             if domain not in in_scope:
                 in_scope.append(domain)
     for item in exclude if isinstance(exclude, list) else []:
         host = str(item.get("host", ""))
         domains = _extract_domains_from_text(host.replace("\\.", ".").replace("^", "").replace("$", ""))
+        if domains:
+            signal = f"{', '.join(domains[:3])} (Burp exclude)"
+            if signal not in blocked_signals:
+                blocked_signals.append(signal)
         for domain in domains:
             if domain not in out_scope:
                 out_scope.append(domain)
-    return in_scope[:100], out_scope[:100]
+    return in_scope[:100], out_scope[:100], allowed_signals[:50], blocked_signals[:50]
+
+
+def _extract_scope_signals_from_text(text: str) -> tuple[list[str], list[str]]:
+    allowed: list[str] = []
+    blocked: list[str] = []
+    chunks = re.split(r"[\n\r\.]", text)
+    for chunk in chunks:
+        line = " ".join(chunk.strip().split())
+        if not line:
+            continue
+        low = line.lower()
+        if any(k in low for k in ("allowed", "in scope", "eligible", "permitted")):
+            if line not in allowed:
+                allowed.append(line[:180])
+        if any(k in low for k in ("out of scope", "not allowed", "excluded", "disallowed", "prohibited")):
+            if line not in blocked:
+                blocked.append(line[:180])
+    return allowed[:40], blocked[:40]
 
 
 def discover_project_context(project_url: str, program_hint: str | None = None) -> DiscoveryData:
@@ -419,19 +468,15 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
 
     tab_links: list[str] = []
     downloaded_files: list[str] = []
+    downloaded_artifact_reasons: list[str] = []
     in_scope_domains: list[str] = []
     out_scope_domains: list[str] = []
+    allowed_scope_signals: list[str] = []
+    out_scope_signals: list[str] = []
 
     if handle:
         base = f"https://hackerone.com/{handle}"
         tab_links = [base if not suf else f"{base}/{suf}" for suf in TAB_SUFFIXES]
-        # Ensure policy/scope tab links are in candidates even when SPA hides link markup.
-        for candidate in [base, f"{base}/policy_scopes"]:
-            if candidate not in policy:
-                policy.append(candidate)
-            if candidate not in scope:
-                scope.append(candidate)
-
         download_dir = Path(".bug_bounty_agent/downloads") / project_key
         csv_file = _download_file(
             f"https://hackerone.com/teams/{handle}/assets/download_csv.csv",
@@ -444,24 +489,69 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
         for path in [csv_file, burp_file]:
             if path:
                 downloaded_files.append(path)
+                if path == csv_file:
+                    downloaded_artifact_reasons.append(
+                        f"{path} <- teams/{handle}/assets/download_csv.csv (scope inventory)"
+                    )
+                if path == burp_file:
+                    downloaded_artifact_reasons.append(
+                        f"{path} <- teams/{handle}/assets/download_burp_project_file.json (include/exclude scope rules)"
+                    )
 
         if csv_file:
-            csv_in, csv_out = _extract_domains_from_csv(Path(csv_file))
+            csv_in, csv_out, csv_allow, csv_block = _extract_domains_from_csv(Path(csv_file))
             for d in csv_in:
                 if d not in in_scope_domains:
                     in_scope_domains.append(d)
             for d in csv_out:
                 if d not in out_scope_domains:
                     out_scope_domains.append(d)
+            for s in csv_allow:
+                if s not in allowed_scope_signals:
+                    allowed_scope_signals.append(s)
+            for s in csv_block:
+                if s not in out_scope_signals:
+                    out_scope_signals.append(s)
 
         if burp_file:
-            b_in, b_out = _extract_domains_from_burp_json(Path(burp_file))
+            b_in, b_out, b_allow, b_block = _extract_domains_from_burp_json(Path(burp_file))
             for d in b_in:
                 if d not in in_scope_domains:
                     in_scope_domains.append(d)
             for d in b_out:
                 if d not in out_scope_domains:
                     out_scope_domains.append(d)
+            for s in b_allow:
+                if s not in allowed_scope_signals:
+                    allowed_scope_signals.append(s)
+            for s in b_block:
+                if s not in out_scope_signals:
+                    out_scope_signals.append(s)
+
+        tab_text: list[str] = []
+        for tab in tab_links:
+            try:
+                tab_html = _fetch(tab)
+                parser = _LinkParser()
+                parser.feed(tab_html)
+                links.extend(parser.links)
+                tab_text.append(" ".join(parser.text_parts))
+            except Exception:
+                continue
+        for text in tab_text:
+            allow_txt, block_txt = _extract_scope_signals_from_text(text)
+            for item in allow_txt:
+                if item not in allowed_scope_signals:
+                    allowed_scope_signals.append(item)
+            for item in block_txt:
+                if item not in out_scope_signals:
+                    out_scope_signals.append(item)
+        # Ensure policy/scope tab links are in candidates even when SPA hides link markup.
+        for candidate in [base, f"{base}/policy_scopes"]:
+            if candidate not in policy:
+                policy.append(candidate)
+            if candidate not in scope:
+                scope.append(candidate)
 
     previous_bugs = _search_previous_bugs(project_url)
     social_links = _search_social_discussions(project_url)
@@ -502,6 +592,9 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
         in_scope_domains=in_scope_domains,
         out_scope_domains=out_scope_domains,
         downloaded_files=downloaded_files,
+        downloaded_artifact_reasons=downloaded_artifact_reasons,
         tab_links=tab_links,
+        allowed_scope_signals=allowed_scope_signals[:60],
+        out_scope_signals=out_scope_signals[:60],
         sources=uniq_sources[:20],
     )

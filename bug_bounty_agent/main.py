@@ -89,6 +89,15 @@ def main() -> int:
     print("Blocked:")
     for idx, item in enumerate(result.recommendation.blocked_tests, start=1):
         print(f"{idx}. {item}")
+    print("[Downloaded Artifacts]")
+    if result.downloaded_artifact_reasons:
+        for idx, item in enumerate(result.downloaded_artifact_reasons, start=1):
+            print(f"{idx}. {item}")
+    else:
+        print("1. None downloaded in this run.")
+    print("[Recommendation Rationale]")
+    for idx, item in enumerate(result.recommendation_rationale, start=1):
+        print(f"{idx}. {item}")
     print("[Checklist]")
     print("Completed:")
     for idx, item in enumerate(result.completed, start=1):

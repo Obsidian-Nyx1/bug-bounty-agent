@@ -70,6 +70,16 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
     else:
         pending.append("Out-of-scope domains could not be parsed from artifacts")
 
+    if discovery.allowed_scope_signals:
+        completed.append("Allowed testing signals extracted from scope/policy")
+    else:
+        pending.append("Allowed testing signals not found in accessible content")
+
+    if discovery.out_scope_signals:
+        completed.append("Out-of-scope restrictions extracted from scope/policy")
+    else:
+        pending.append("Out-of-scope restrictions not found in accessible content")
+
     pending.extend(
         [
             "Validate all discovered links manually",

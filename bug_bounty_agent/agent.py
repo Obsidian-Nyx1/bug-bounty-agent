@@ -45,6 +45,8 @@ class AgentResult:
     report_path: str | None
     recommendation: DomainRecommendation
     scope_data: ScopeData
+    downloaded_artifact_reasons: List[str]
+    recommendation_rationale: List[str]
 
 
 class BugBountyAgent:
@@ -84,6 +86,8 @@ class BugBountyAgent:
                     blocked_tests=[],
                 ),
                 scope_data=ScopeData(in_scope=[], out_scope=[], raw_lines=[]),
+                downloaded_artifact_reasons=[],
+                recommendation_rationale=[],
             )
 
         url_error = self._validate_project_url(data.program_url)
@@ -113,6 +117,8 @@ class BugBountyAgent:
                     blocked_tests=[],
                 ),
                 scope_data=ScopeData(in_scope=[], out_scope=[], raw_lines=[]),
+                downloaded_artifact_reasons=[],
+                recommendation_rationale=[],
             )
 
         discovery = discover_project_context(data.program_url, data.program_hint)
@@ -198,6 +204,14 @@ class BugBountyAgent:
             "Step 2 recommendation generated from checklist/discovery + parsed scope patterns."
         )
 
+        rationale = [
+            f"In-scope domains parsed: {len(discovery.in_scope_domains)}",
+            f"Out-of-scope domains parsed: {len(discovery.out_scope_domains)}",
+            f"Allowed scope signals: {len(discovery.allowed_scope_signals)}",
+            f"Out-of-scope restriction signals: {len(discovery.out_scope_signals)}",
+            f"Policy/Scope references discovered: {len(discovery.candidate_policy_links) + len(discovery.candidate_scope_links)}",
+        ]
+
         report_path = write_intake_report(
             ReportData(
                 operator_id=data.operator_id,
@@ -225,6 +239,8 @@ class BugBountyAgent:
             report_path=str(report_path),
             recommendation=recommendation,
             scope_data=scope_data,
+            downloaded_artifact_reasons=discovery.downloaded_artifact_reasons,
+            recommendation_rationale=rationale,
         )
 
     @staticmethod
