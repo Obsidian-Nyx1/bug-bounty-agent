@@ -28,6 +28,12 @@ class MultiModelResult:
     notes: list[str]
 
 
+@dataclass
+class IdeaResult:
+    ideas: list[str]
+    notes: list[str]
+
+
 def _is_safe_endpoint(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -181,3 +187,73 @@ def summarize_with_github_models(prompt: str) -> MultiModelResult:
     consensus = sorted(good, key=lambda r: len(r.content))[0].content
     notes.append(f"Ran {len(selected)} model(s) from GitHub catalog.")
     return MultiModelResult(summary=consensus, runs=runs, notes=notes)
+
+
+def generate_test_ideas_with_github_models(prompt: str, target_count: int = 15) -> IdeaResult:
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        return IdeaResult(ideas=[], notes=["GITHUB_TOKEN missing. Skipped AI test idea generation."])
+    if not (_is_safe_endpoint(CATALOG_ENDPOINT) and _is_safe_endpoint(INFERENCE_ENDPOINT)):
+        return IdeaResult(ideas=[], notes=["Security check failed for model endpoint host allowlist."])
+
+    models, notes = _get_catalog_models(token)
+    if not models:
+        return IdeaResult(ideas=[], notes=notes)
+    clean_prompt = _sanitize_prompt(prompt)
+    selected = models[: max(1, min(6, len(models)))]
+    ideas: list[str] = []
+    for model in selected:
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate concise in-scope bug bounty test ideas based on scope/policy artifacts. "
+                        "Return one idea per line, no numbering, max 12 words per line."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"{clean_prompt}\nReturn up to {target_count} distinct test ideas.",
+                },
+            ],
+            "temperature": 0.2,
+        }
+        req = Request(
+            INFERENCE_ENDPOINT,
+            method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        try:
+            with urlopen(req, timeout=25) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            content = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            if not content:
+                continue
+            for line in content.splitlines():
+                idea = line.strip().lstrip("-*0123456789. ").strip()
+                if not idea:
+                    continue
+                if idea not in ideas:
+                    ideas.append(idea)
+                if len(ideas) >= target_count:
+                    break
+        except Exception:
+            continue
+        if len(ideas) >= target_count:
+            break
+    if ideas:
+        notes.append(f"Generated {len(ideas)} AI test idea(s).")
+    else:
+        notes.append("No AI test ideas generated from available model responses.")
+    return IdeaResult(ideas=ideas[:target_count], notes=notes)

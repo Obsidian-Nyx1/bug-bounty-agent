@@ -153,6 +153,21 @@ def main() -> int:
     if rationale_rows:
         _print_table(["#", "Evidence"], rationale_rows)
 
+    _print_section("Step 3 Analysis: In-Scope Test Matrix")
+    matrix_rows = [
+        ["Total Tests", str(len(result.test_matrix))],
+        ["Matrix File", result.test_matrix_path or "Not generated"],
+    ]
+    _print_table(["Field", "Value"], matrix_rows)
+    if result.test_matrix:
+        preview_rows = [
+            [t.test_id, t.category, t.test_name, t.target, t.scope_basis]
+            for t in result.test_matrix[:50]
+        ]
+        _print_table(["ID", "Category", "Test", "Target", "Scope"], preview_rows)
+    else:
+        _print_table(["ID", "Category", "Test", "Target", "Scope"], [["-", "-", "No tests generated", "-", "-"]])
+
     _print_section("Downloaded Artifacts")
     if result.downloaded_artifact_reasons:
         artifact_rows = [[str(idx), item] for idx, item in enumerate(result.downloaded_artifact_reasons, start=1)]

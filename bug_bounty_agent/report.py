@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bug_bounty_agent.analysis import TestCase
 from bug_bounty_agent.discovery import DiscoveryData
 from bug_bounty_agent.scope import DomainRecommendation, ScopeData
 
@@ -22,6 +23,8 @@ class ReportData:
     discovery: DiscoveryData
     recommendation: DomainRecommendation
     scope_data: ScopeData
+    test_matrix: list[TestCase]
+    test_matrix_path: str | None
 
 
 def write_intake_report(data: ReportData) -> Path:
@@ -46,6 +49,23 @@ def write_intake_report(data: ReportData) -> Path:
     lines.append(f"- Recommended domain: {data.recommendation.domain or 'None'}")
     lines.append(f"- Scope status: {data.recommendation.status}")
     lines.append(f"- Why: {data.recommendation.reason}")
+    lines.append("")
+
+    lines.append("## Step 3 Analysis")
+    lines.append(f"- Test matrix file: {data.test_matrix_path or 'Not generated'}")
+    lines.append(f"- Total tests generated: {len(data.test_matrix)}")
+    lines.append("")
+    lines.append("### Test Matrix Preview")
+    if data.test_matrix:
+        lines.append("| ID | Category | Test | Target | Scope Basis |")
+        lines.append("|---|---|---|---|---|")
+        for test in data.test_matrix[:50]:
+            lines.append(
+                f"| {test.test_id} | {test.category} | {test.test_name} | "
+                f"{test.target} | {test.scope_basis} |"
+            )
+    else:
+        lines.append("- No tests generated in this run.")
     lines.append("")
     lines.append("### Allowed Tests (Next)")
     lines.extend(_as_bullets(data.recommendation.allowed_tests))

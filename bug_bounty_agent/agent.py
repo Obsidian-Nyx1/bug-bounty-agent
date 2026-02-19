@@ -9,7 +9,8 @@ from urllib.parse import urlparse
 import ipaddress
 from datetime import datetime, timezone
 
-from bug_bounty_agent.ai_client import summarize_with_github_models
+from bug_bounty_agent.ai_client import generate_test_ideas_with_github_models, summarize_with_github_models
+from bug_bounty_agent.analysis import TestCase, analyze_information
 from bug_bounty_agent.discovery import discover_project_context
 from bug_bounty_agent.learning import LearningStore
 from bug_bounty_agent.planner import build_checklist, build_plan
@@ -47,6 +48,8 @@ class AgentResult:
     scope_data: ScopeData
     downloaded_artifact_reasons: List[str]
     recommendation_rationale: List[str]
+    test_matrix: List[TestCase]
+    test_matrix_path: str | None
 
 
 class BugBountyAgent:
@@ -88,6 +91,8 @@ class BugBountyAgent:
                 scope_data=ScopeData(in_scope=[], out_scope=[], raw_lines=[]),
                 downloaded_artifact_reasons=[],
                 recommendation_rationale=[],
+                test_matrix=[],
+                test_matrix_path=None,
             )
 
         url_error = self._validate_project_url(data.program_url)
@@ -119,6 +124,8 @@ class BugBountyAgent:
                 scope_data=ScopeData(in_scope=[], out_scope=[], raw_lines=[]),
                 downloaded_artifact_reasons=[],
                 recommendation_rationale=[],
+                test_matrix=[],
+                test_matrix_path=None,
             )
 
         discovery = discover_project_context(data.program_url, data.program_hint)
@@ -203,6 +210,24 @@ class BugBountyAgent:
         notes.append(
             "Step 2 recommendation generated from checklist/discovery + parsed scope patterns."
         )
+        idea_prompt = (
+            f"Project: {discovery.project_key}\n"
+            f"In-scope domains: {discovery.in_scope_domains}\n"
+            f"Out-of-scope domains: {discovery.out_scope_domains}\n"
+            f"Allowed signals: {discovery.allowed_scope_signals}\n"
+            f"Out-of-scope signals: {discovery.out_scope_signals}\n"
+            f"Downloaded files: {discovery.downloaded_files}\n"
+        )
+        idea_result = generate_test_ideas_with_github_models(idea_prompt, target_count=20)
+        notes.extend(idea_result.notes)
+        analysis = analyze_information(
+            discovery=discovery,
+            scope_data=scope_data,
+            ai_ideas=idea_result.ideas,
+            target_count=50,
+            operator_id=data.operator_id,
+        )
+        notes.extend(analysis.notes)
 
         rationale = [
             f"In-scope domains parsed: {len(discovery.in_scope_domains)}",
@@ -224,6 +249,8 @@ class BugBountyAgent:
                 discovery=discovery,
                 recommendation=recommendation,
                 scope_data=scope_data,
+                test_matrix=analysis.tests,
+                test_matrix_path=analysis.matrix_path,
             )
         )
         notes.append(f"Intake report saved: {report_path}")
@@ -241,6 +268,8 @@ class BugBountyAgent:
             scope_data=scope_data,
             downloaded_artifact_reasons=discovery.downloaded_artifact_reasons,
             recommendation_rationale=rationale,
+            test_matrix=analysis.tests,
+            test_matrix_path=analysis.matrix_path,
         )
 
     @staticmethod
