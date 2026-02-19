@@ -10,6 +10,10 @@ from datetime import datetime, timezone
 from bug_bounty_agent.discovery import DiscoveryData
 from bug_bounty_agent.scope import ScopeData
 
+SCOPE_VERIFIED_IN = "verified_in_scope_from_policy_or_artifact"
+SCOPE_VERIFIED_OUT = "verified_out_of_scope_from_policy_or_artifact"
+SCOPE_DISCOVERED_UNVERIFIED = "discovered_target_requires_scope_validation"
+
 
 @dataclass
 class TestCase:
@@ -114,6 +118,9 @@ def _pick_targets(discovery: DiscoveryData, scope_data: ScopeData) -> list[str]:
     for item in discovery.in_scope_domains:
         if item not in targets:
             targets.append(item)
+    for item in _verified_in_scope_non_domain_assets(discovery):
+        if item not in targets:
+            targets.append(item)
     for item in discovery.domain_candidates:
         if item not in targets:
             targets.append(item)
@@ -127,10 +134,40 @@ def _pick_targets(discovery: DiscoveryData, scope_data: ScopeData) -> list[str]:
 
 def _scope_basis_for_target(target: str, scope_data: ScopeData, discovery: DiscoveryData) -> str:
     if target in scope_data.in_scope or target in discovery.in_scope_domains:
-        return "in_scope_artifact"
+        return SCOPE_VERIFIED_IN
+    if target in _verified_in_scope_non_domain_assets(discovery):
+        return SCOPE_VERIFIED_IN
     if target in scope_data.out_scope or target in discovery.out_scope_domains:
-        return "out_of_scope_artifact"
-    return "candidate_from_discovery"
+        return SCOPE_VERIFIED_OUT
+    if target in _verified_out_scope_non_domain_assets(discovery):
+        return SCOPE_VERIFIED_OUT
+    return SCOPE_DISCOVERED_UNVERIFIED
+
+
+def _verified_in_scope_non_domain_assets(discovery: DiscoveryData) -> list[str]:
+    assets: list[str] = []
+    for signal in discovery.allowed_scope_signals:
+        candidate = signal.split(" (", 1)[0].strip()
+        if not candidate or candidate == "unlabeled asset":
+            continue
+        if "." in candidate:
+            continue
+        if candidate not in assets:
+            assets.append(candidate)
+    return assets[:40]
+
+
+def _verified_out_scope_non_domain_assets(discovery: DiscoveryData) -> list[str]:
+    assets: list[str] = []
+    for signal in discovery.out_scope_signals:
+        candidate = signal.split(" (", 1)[0].strip()
+        if not candidate or candidate == "unlabeled asset":
+            continue
+        if "." in candidate:
+            continue
+        if candidate not in assets:
+            assets.append(candidate)
+    return assets[:40]
 
 
 def _base_templates() -> list[tuple[str, str, str]]:

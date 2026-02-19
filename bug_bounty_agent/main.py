@@ -293,6 +293,16 @@ def _render_step_3(result) -> None:
         checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
     _print_table(["Status", "Task"], checklist_rows)
 
+    _print_section("3) Scope Labels Guide")
+    _print_table(
+        ["Label", "Meaning"],
+        [
+            ["verified_in_scope_from_policy_or_artifact", "Explicitly in scope from program policy/scope artifacts."],
+            ["verified_out_of_scope_from_policy_or_artifact", "Explicitly out of scope from program policy/scope artifacts."],
+            ["discovered_target_requires_scope_validation", "Found during discovery but not explicitly verified in scope yet."],
+        ],
+    )
+
     _print_section("3) Next Actions")
     _print_table(["#", "Action"], [[str(idx), item] for idx, item in enumerate(result.suggestions, start=1)])
 
