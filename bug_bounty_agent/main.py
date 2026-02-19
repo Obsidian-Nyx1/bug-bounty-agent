@@ -6,9 +6,19 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+CYAN = "\033[38;5;51m"
+GREEN = "\033[38;5;46m"
+YELLOW = "\033[38;5;220m"
+RED = "\033[38;5;196m"
+WHITE = "\033[38;5;255m"
+GRAY = "\033[38;5;245m"
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +53,43 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _color(text: str, color: str, bold: bool = False) -> str:
+    style = f"{BOLD}{color}" if bold else color
+    return f"{style}{text}{RESET}"
+
+
+def _terminal_width() -> int:
+    return max(80, min(140, shutil.get_terminal_size((100, 20)).columns))
+
+
+def _print_section(title: str) -> None:
+    line = "-" * min(100, _terminal_width() - 2)
+    print(_color(f"\n{title}", CYAN, bold=True))
+    print(_color(line, GRAY))
+
+
+def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+    if not rows:
+        return
+    string_rows = [[str(cell) for cell in row] for row in rows]
+    widths = [len(h) for h in headers]
+    for row in string_rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(cell))
+
+    def render_row(items: list[str]) -> str:
+        cells = [f" {items[i]:<{widths[i]}} " for i in range(len(items))]
+        return "|" + "|".join(cells) + "|"
+
+    border = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+    print(_color(border, GRAY))
+    print(_color(render_row(headers), WHITE, bold=True))
+    print(_color(border, GRAY))
+    for row in string_rows:
+        print(render_row(row))
+    print(_color(border, GRAY))
+
+
 def main() -> int:
     args = parse_args()
     print(render_banner())
@@ -74,45 +121,73 @@ def main() -> int:
         )
     )
 
-    print(f"[Result] {result.status}")
-    print(f"[Summary] {result.summary}")
-    print("[Suggestions]")
-    for idx, item in enumerate(result.suggestions, start=1):
-        print(f"{idx}. {item}")
-    print("[Step 2 Domain Recommendation]")
-    print(f"Domain: {result.recommendation.domain or 'None'}")
-    print(f"Scope status: {result.recommendation.status}")
-    print(f"Reason: {result.recommendation.reason}")
-    print("Allowed:")
-    for idx, item in enumerate(result.recommendation.allowed_tests, start=1):
-        print(f"{idx}. {item}")
-    print("Blocked:")
-    for idx, item in enumerate(result.recommendation.blocked_tests, start=1):
-        print(f"{idx}. {item}")
-    print("[Downloaded Artifacts]")
+    _print_section("Overview")
+    overview_rows = [
+        ["Status", result.status],
+        ["Summary", result.summary],
+        ["Report", result.report_path or "Not generated"],
+    ]
+    _print_table(["Field", "Value"], overview_rows)
+
+    _print_section("Step 2 Recommendation")
+    rec_rows = [
+        ["Domain", result.recommendation.domain or "None"],
+        ["Scope Status", result.recommendation.status],
+        ["Reason", result.recommendation.reason],
+    ]
+    _print_table(["Field", "Value"], rec_rows)
+
+    if result.recommendation.allowed_tests:
+        _print_table(
+            ["Allowed Next Tests", "Details"],
+            [[str(idx), item] for idx, item in enumerate(result.recommendation.allowed_tests, start=1)],
+        )
+    if result.recommendation.blocked_tests:
+        _print_table(
+            ["Blocked / Not Allowed", "Details"],
+            [[str(idx), item] for idx, item in enumerate(result.recommendation.blocked_tests, start=1)],
+        )
+
+    _print_section("Why This Recommendation")
+    rationale_rows = [[str(idx), item] for idx, item in enumerate(result.recommendation_rationale, start=1)]
+    if rationale_rows:
+        _print_table(["#", "Evidence"], rationale_rows)
+
+    _print_section("Downloaded Artifacts")
     if result.downloaded_artifact_reasons:
-        for idx, item in enumerate(result.downloaded_artifact_reasons, start=1):
-            print(f"{idx}. {item}")
+        artifact_rows = [[str(idx), item] for idx, item in enumerate(result.downloaded_artifact_reasons, start=1)]
+        _print_table(["#", "Downloaded File and Reason"], artifact_rows)
     else:
-        print("1. None downloaded in this run.")
-    print("[Recommendation Rationale]")
-    for idx, item in enumerate(result.recommendation_rationale, start=1):
-        print(f"{idx}. {item}")
-    print("[Checklist]")
-    print("Completed:")
-    for idx, item in enumerate(result.completed, start=1):
-        print(f"{idx}. [x] {item}")
-    print("Pending:")
-    for idx, item in enumerate(result.pending, start=1):
-        print(f"{idx}. [ ] {item}")
-    print("[Sources]")
-    for idx, item in enumerate(result.sources, start=1):
-        print(f"{idx}. {item}")
-    print("[Notes]")
-    for idx, item in enumerate(result.notes, start=1):
-        print(f"{idx}. {item}")
+        _print_table(["#", "Downloaded File and Reason"], [["1", "None downloaded in this run"]])
+
+    _print_section("Checklist")
+    checklist_rows: list[list[str]] = []
+    for item in result.completed:
+        checklist_rows.append([_color("DONE", GREEN, bold=True), item])
+    for item in result.pending:
+        checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
+    _print_table(["Status", "Task"], checklist_rows)
+
+    _print_section("Next Actions")
+    action_rows = [[str(idx), item] for idx, item in enumerate(result.suggestions, start=1)]
+    _print_table(["#", "Action"], action_rows)
+
+    _print_section("Sources")
+    source_rows = [[str(idx), item] for idx, item in enumerate(result.sources, start=1)]
+    if source_rows:
+        _print_table(["#", "Source"], source_rows)
+    else:
+        _print_table(["#", "Source"], [["1", "No sources found in this run"]])
+
+    _print_section("Notes")
+    note_rows = [[str(idx), item] for idx, item in enumerate(result.notes, start=1)]
+    if note_rows:
+        _print_table(["#", "Note"], note_rows)
+    else:
+        _print_table(["#", "Note"], [["1", "No notes"]])
+
     if result.report_path:
-        print(f"[Report] {result.report_path}")
+        print(_color(f"\n[Report Saved] {result.report_path}", CYAN, bold=True))
     return 0
 
 
