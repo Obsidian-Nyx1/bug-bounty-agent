@@ -121,7 +121,19 @@ def main() -> int:
         )
     )
 
-    _print_section("Overview")
+    _print_section("Workflow")
+    _print_table(
+        ["Step", "Action"],
+        [
+            ["1)", "Intake Program Information"],
+            ["2)", "Review Scope and Recommend Target/Test Direction"],
+            ["3)", "Analyze Artifacts and Generate Test Matrix"],
+            ["4)", "Compile and Save Report"],
+            ["Quit", "Exit after reviewing checklist and next actions"],
+        ],
+    )
+
+    _print_section("1) Intake Program Information")
     overview_rows = [
         ["Status", result.status],
         ["Summary", result.summary],
@@ -129,7 +141,7 @@ def main() -> int:
     ]
     _print_table(["Field", "Value"], overview_rows)
 
-    _print_section("Step 2 Recommendation")
+    _print_section("2) Scope Recommendation")
     rec_rows = [
         ["Domain", result.recommendation.domain or "None"],
         ["Scope Status", result.recommendation.status],
@@ -148,12 +160,12 @@ def main() -> int:
             [[str(idx), item] for idx, item in enumerate(result.recommendation.blocked_tests, start=1)],
         )
 
-    _print_section("Why This Recommendation")
+    _print_section("2) Why This Recommendation")
     rationale_rows = [[str(idx), item] for idx, item in enumerate(result.recommendation_rationale, start=1)]
     if rationale_rows:
         _print_table(["#", "Evidence"], rationale_rows)
 
-    _print_section("Step 3 Analysis: In-Scope Test Matrix")
+    _print_section("3) Analyze Information and Build Test Matrix")
     matrix_rows = [
         ["Total Tests", str(len(result.test_matrix))],
         ["Matrix File", result.test_matrix_path or "Not generated"],
@@ -168,14 +180,14 @@ def main() -> int:
     else:
         _print_table(["ID", "Category", "Test", "Target", "Scope"], [["-", "-", "No tests generated", "-", "-"]])
 
-    _print_section("Downloaded Artifacts")
+    _print_section("3) Downloaded Artifacts")
     if result.downloaded_artifact_reasons:
         artifact_rows = [[str(idx), item] for idx, item in enumerate(result.downloaded_artifact_reasons, start=1)]
         _print_table(["#", "Downloaded File and Reason"], artifact_rows)
     else:
         _print_table(["#", "Downloaded File and Reason"], [["1", "None downloaded in this run"]])
 
-    _print_section("Checklist")
+    _print_section("3) Checklist")
     checklist_rows: list[list[str]] = []
     for item in result.completed:
         checklist_rows.append([_color("DONE", GREEN, bold=True), item])
@@ -183,18 +195,18 @@ def main() -> int:
         checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
     _print_table(["Status", "Task"], checklist_rows)
 
-    _print_section("Next Actions")
+    _print_section("3) Next Actions")
     action_rows = [[str(idx), item] for idx, item in enumerate(result.suggestions, start=1)]
     _print_table(["#", "Action"], action_rows)
 
-    _print_section("Sources")
+    _print_section("4) Compile Report: Sources Used")
     source_rows = [[str(idx), item] for idx, item in enumerate(result.sources, start=1)]
     if source_rows:
         _print_table(["#", "Source"], source_rows)
     else:
         _print_table(["#", "Source"], [["1", "No sources found in this run"]])
 
-    _print_section("Notes")
+    _print_section("4) Compile Report: Notes")
     note_rows = [[str(idx), item] for idx, item in enumerate(result.notes, start=1)]
     if note_rows:
         _print_table(["#", "Note"], note_rows)
@@ -203,6 +215,7 @@ def main() -> int:
 
     if result.report_path:
         print(_color(f"\n[Report Saved] {result.report_path}", CYAN, bold=True))
+    print(_color("[Quit] Press Ctrl+C or close terminal when finished.", RED, bold=True))
     return 0
 
 
