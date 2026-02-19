@@ -15,7 +15,7 @@ import os
 import sys
 from bs4 import BeautifulSoup
 from collections import deque
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse
 import argparse
 
 # Optional: for DOM XSS testing
@@ -88,6 +88,7 @@ def get_cookies_from_user():
                 cookies[name] = value
     return cookies
 
+
 def parse_cookies(cookie_str):
     """Parse cookies from 'name=value; name2=value2' format."""
     cookies = {}
@@ -99,23 +100,10 @@ def parse_cookies(cookie_str):
     return cookies
 
 def is_same_domain(url, base_domain):
-    """
-    Check if URL belongs to the same domain/host as base_domain.
-
-    NOTE: base_domain in this script is a netloc/hostname (e.g. "www.example.com"),
-    not a full URL. The old version incorrectly urlparse()'d it as if it were a URL.
-    """
+    """Check if URL belongs to the same domain as base_domain."""
     parsed = urlparse(url)
-    host = (parsed.netloc or "").lower()
-    base = (base_domain or "").lower()
-
-    # Normalize "www."
-    if host.startswith("www."):
-        host = host[4:]
-    if base.startswith("www."):
-        base = base[4:]
-
-    return host == base
+    base_parsed = urlparse(base_domain)
+    return parsed.netloc == base_parsed.netloc or (parsed.netloc == '' and base_parsed.netloc)
 
 def normalize_url(url, base):
     """Join relative URL with base and return full URL."""
@@ -148,20 +136,10 @@ def get_links(url, html_content, base_domain):
     soup = BeautifulSoup(html_content, 'html.parser')
     links = set()
     for a in soup.find_all('a', href=True):
-        href = (a.get('href') or '').strip()
-        if not href:
-            continue
-
-        # Skip non-navigational / dangerous schemes
-        if href.startswith(("mailto:", "tel:", "javascript:")):
-            continue
-
+        href = a['href']
         full_url = normalize_url(href, url)
-        full_url, _ = urldefrag(full_url)  # remove #fragments
-
         if is_same_domain(full_url, base_domain):
             links.add(full_url)
-
     return links
 
 def extract_url_params(url):
@@ -177,6 +155,8 @@ def is_potentially_vulnerable(response_text, payload):
     Simple check: if payload appears in response without any obvious encoding,
     mark as potential XSS. (This is simplistic; real detection needs context analysis.)
     """
+    # Remove any URL encoding? We'll just check raw existence.
+    # A better check would try to see if payload appears inside a context where it could execute.
     return payload in response_text
 
 # ===================== CRAWLER =====================
@@ -302,12 +282,17 @@ class XSSTester:
         try:
             self.driver.set_page_load_timeout(10)
             self.driver.get(url)
+            # Inject payload into page (if not already in URL) – for demonstration, we just load the URL.
+            # Actually, we need a way to trigger DOM XSS; a simple approach is to execute JavaScript.
+            # But for simplicity, we assume the payload is already in the page via URL or form.
+            # We'll try to detect alerts.
             try:
                 alert = self.driver.switch_to.alert
-                _ = alert.text
+                alert_text = alert.text
                 alert.accept()
                 return True
-            except Exception:
+            except:
+                # No alert, but we could also check for console errors or DOM modifications
                 pass
         except TimeoutException:
             pass
@@ -353,6 +338,7 @@ class XSSTester:
             self.driver.quit()
 
 # ===================== MAIN SCANNER =====================
+
 def is_wordpress(base_url: str, session: requests.Session) -> bool:
     checks = ["/wp-admin/", "/wp-content/", "/wp-includes/", "/wp-login.php"]
     for path in checks:
@@ -363,6 +349,7 @@ def is_wordpress(base_url: str, session: requests.Session) -> bool:
         except Exception:
             continue
     return False
+
 
 def run_scan(target, depth=2, use_headless=False, cookies=None):
     if not target.startswith('http'):
@@ -386,10 +373,10 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
 
     # Collect all parameters from URLs
     url_params = {}
-    for u in urls:
-        params = extract_url_params(u)
+    for url in urls:
+        params = extract_url_params(url)
         if params:
-            url_params[u] = params
+            url_params[url] = params
 
     tester = XSSTester(cookies=cookies, use_headless=use_headless)
 
@@ -402,11 +389,11 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
 
     # Test reflected XSS in URL parameters
     print("\n[*] Testing reflected XSS in URL parameters...")
-    for u, params in url_params.items():
+    for url, params in url_params.items():
         for param in params:
             for payload in PAYLOADS:
-                print(f"Testing {u}?{param}=...")
-                result_url = tester.test_reflected(u, param, payload)
+                print(f"Testing {url}?{param}=...")
+                result_url = tester.test_reflected(url, param, payload)
                 if result_url:
                     print(f"[!] Potential reflected XSS: {result_url}")
                     findings['reflected'].append({'url': result_url, 'param': param, 'payload': payload})
@@ -423,29 +410,37 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
                 break
 
     # Test stored XSS: after submitting payload, re-crawl to see if payload appears anywhere
+    # For simplicity, we'll just pick a few payloads and check all URLs again.
     if findings['reflected']:
         print("\n[*] Testing for stored XSS (checking if payloads persist)...")
+        # Use a unique payload to avoid confusion
         stored_test_payload = "ST0R3D-XSS-TEST"
+        # Inject it into a form or parameter (simplified: just try a known reflection point)
+        # Actually, we need to submit the payload to a point that might store it (e.g., comment form).
+        # For demonstration, we'll just re-check all URLs after a delay.
         time.sleep(2)
         stored_urls = tester.test_stored(urls, stored_test_payload)
-        for u in stored_urls:
-            print(f"[!] Potential stored XSS at {u} (payload appears)")
-            findings['stored'].append(u)
+        for url in stored_urls:
+            print(f"[!] Potential stored XSS at {url} (payload appears)")
+            findings['stored'].append(url)
 
     # Test DOM XSS if headless enabled
     if use_headless and SELENIUM_AVAILABLE:
         print("\n[*] Testing for DOM XSS...")
-        for u in urls:
-            test_url = u + "#" + urllib.parse.quote(DOM_PAYLOAD)
+        for url in urls:
+            # Try with a simple DOM payload (we need to inject it into the page)
+            # One way: add fragment or param
+            test_url = url + "#" + urllib.parse.quote(DOM_PAYLOAD)
             if tester.test_dom(test_url, DOM_PAYLOAD):
                 print(f"[!] Potential DOM XSS at {test_url}")
                 findings['dom'].append(test_url)
             else:
-                parsed = urlparse(u)
+                # Also try with GET parameter
+                parsed = urlparse(url)
                 if parsed.query:
-                    test_url = u + "&xss=" + urllib.parse.quote(DOM_PAYLOAD)
+                    test_url = url + "&xss=" + urllib.parse.quote(DOM_PAYLOAD)
                 else:
-                    test_url = u + "?xss=" + urllib.parse.quote(DOM_PAYLOAD)
+                    test_url = url + "?xss=" + urllib.parse.quote(DOM_PAYLOAD)
                 if tester.test_dom(test_url, DOM_PAYLOAD):
                     print(f"[!] Potential DOM XSS at {test_url}")
                     findings['dom'].append(test_url)
@@ -489,6 +484,7 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
 
     return findings
 
+
 def main():
     parser = argparse.ArgumentParser(description="Unified XSS Scanner")
     parser.add_argument("--target", help="Target URL/domain to scan")
@@ -510,7 +506,7 @@ def main():
             target = 'http://' + target
         try:
             depth = int(input("Crawl depth (default 2): ").strip() or "2")
-        except Exception:
+        except:
             depth = 2
         use_headless = ask_yes_no("Use headless browser for DOM XSS testing? (requires selenium and Chrome driver)")
         cookies = get_cookies_from_user()
