@@ -161,7 +161,7 @@ def is_potentially_vulnerable(response_text, payload):
 
 # ===================== CRAWLER =====================
 class Crawler:
-    def __init__(self, start_url, max_depth=2, cookies=None):
+    def __init__(self, start_url, max_depth=2, cookies=None, admin_only=False):
         self.start_url = start_url
         self.base_domain = urlparse(start_url).netloc
         self.max_depth = max_depth
@@ -171,6 +171,7 @@ class Crawler:
         self.urls_to_visit.append((start_url, 0))
         self.all_urls = set()
         self.all_forms = []
+        self.admin_only = admin_only
 
     def crawl(self):
         """Perform breadth-first crawl."""
@@ -181,6 +182,8 @@ class Crawler:
         while self.urls_to_visit:
             url, depth = self.urls_to_visit.popleft()
             if url in self.visited or depth > self.max_depth:
+                continue
+            if self.admin_only and "/wp-admin/" not in url:
                 continue
             self.visited.add(url)
             print(f"[Crawl] Depth {depth}: {url}")
@@ -299,14 +302,69 @@ class XSSTester:
             print(f"DOM test error: {e}")
         return False
 
+    def check_wordpress_admin_notices(self, admin_urls):
+        """
+        Visit WordPress admin URLs and inspect notice blocks for risky HTML tags.
+        """
+        findings = []
+        dangerous_tags = [
+            "script", "iframe", "object", "embed", "form",
+            "input", "button", "onerror", "onload", "onmouseover", "onclick",
+        ]
+        for url in admin_urls:
+            try:
+                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                notices = soup.find_all("div", class_=re.compile(r"notice"))
+                for notice in notices:
+                    p = notice.find("p") or notice
+                    inner_html = str(p)
+                    for tag in dangerous_tags:
+                        if re.search(rf"<{tag}[^>]*>", inner_html, re.IGNORECASE):
+                            findings.append(
+                                {
+                                    "url": url,
+                                    "notice_html": inner_html,
+                                    "suspicious_tag": tag,
+                                }
+                            )
+                            break
+            except Exception as exc:
+                print(f"Error checking admin notices at {url}: {exc}")
+        return findings
+
     def close(self):
         if self.driver:
             self.driver.quit()
 
 # ===================== MAIN SCANNER =====================
+
+def is_wordpress(base_url: str, session: requests.Session) -> bool:
+    checks = ["/wp-admin/", "/wp-content/", "/wp-includes/", "/wp-login.php"]
+    for path in checks:
+        try:
+            resp = session.get(urljoin(base_url, path), timeout=5)
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def run_scan(target, depth=2, use_headless=False, cookies=None):
     if not target.startswith('http'):
         target = 'https://' + target
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.update(cookies or {})
+
+    print("\n[*] Checking if target is WordPress...")
+    wp_detected = is_wordpress(target, session)
+    if wp_detected:
+        print("[+] WordPress detected.")
+    else:
+        print("[-] Not detected as WordPress (or login required).")
+
     print("\n[*] Starting reconnaissance...")
     crawler = Crawler(target, max_depth=depth, cookies=cookies)
     urls, forms = crawler.crawl()
@@ -325,7 +383,8 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
     findings = {
         'reflected': [],
         'stored': [],
-        'dom': []
+        'dom': [],
+        'wordpress_admin_notices': [],
     }
 
     # Test reflected XSS in URL parameters
@@ -386,6 +445,25 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
                     print(f"[!] Potential DOM XSS at {test_url}")
                     findings['dom'].append(test_url)
 
+    # WordPress-specific admin notice checks.
+    if wp_detected:
+        print("\n[*] Crawling WordPress admin area for admin notice XSS...")
+        admin_crawler = Crawler(target, max_depth=1, cookies=cookies, admin_only=True)
+        admin_urls, _ = admin_crawler.crawl()
+        if admin_urls:
+            print(f"[*] Found {len(admin_urls)} admin URLs.")
+            wp_findings = tester.check_wordpress_admin_notices(admin_urls)
+            if wp_findings:
+                print(f"[!] Found {len(wp_findings)} potentially vulnerable admin notices.")
+                findings["wordpress_admin_notices"] = wp_findings
+                for finding in wp_findings:
+                    preview = finding["notice_html"][:120].replace("\n", " ")
+                    print(f"  - {finding['url']} : {preview}")
+            else:
+                print("[*] No unescaped admin notices detected.")
+        else:
+            print("[*] No admin URLs crawled (authentication may be required).")
+
     tester.close()
 
     # Generate report
@@ -399,6 +477,10 @@ def run_scan(target, depth=2, use_headless=False, cookies=None):
     print(f"DOM XSS findings: {len(findings['dom'])}")
     for f in findings['dom']:
         print(f"  - {f}")
+    if wp_detected:
+        print(f"WordPress admin notice issues: {len(findings['wordpress_admin_notices'])}")
+        for f in findings['wordpress_admin_notices']:
+            print(f"  - {f['url']} : suspicious tag <{f['suspicious_tag']}> in notice")
 
     return findings
 
