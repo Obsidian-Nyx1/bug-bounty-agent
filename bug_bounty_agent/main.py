@@ -51,6 +51,13 @@ def parse_args() -> argparse.Namespace:
         help="Stable operator identity used for learning/respawn checkpoints.",
     )
     parser.add_argument(
+        "--run-automated",
+        nargs="?",
+        const="test",
+        default=None,
+        help="Run automated in-scope checks. Example: --run-automated test",
+    )
+    parser.add_argument(
         "--non-interactive-output",
         action="store_true",
         help="Print all sections at once instead of interactive menu mode.",
@@ -198,6 +205,15 @@ def _render_step_4(result) -> None:
 
     if result.report_path:
         print(_color(f"\n[Report Saved] {result.report_path}", CYAN, bold=True))
+    _print_section("4) Automated Check Reports")
+    _print_table(
+        ["Artifact", "Path / Value"],
+        [
+            ["Automated Markdown", result.automated_md_report or "Not generated"],
+            ["Automated PDF", result.automated_pdf_report or "Not generated"],
+            ["Automated Findings", str(len(result.automated_findings))],
+        ],
+    )
 
 
 def _render_all_steps(result) -> None:
@@ -235,6 +251,7 @@ def main() -> int:
             policy_file=Path(args.policy_file) if args.policy_file else None,
             mode=args.mode,
             operator_id=args.operator_id,
+            run_automated=(args.run_automated or "").strip().lower() == "test",
         )
     )
 

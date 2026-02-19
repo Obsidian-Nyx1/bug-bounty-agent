@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from bug_bounty_agent.ai_client import generate_test_ideas_with_github_models, summarize_with_github_models
 from bug_bounty_agent.analysis import TestCase, analyze_information
+from bug_bounty_agent.automation import AutomatedFinding, run_automated_tests
 from bug_bounty_agent.discovery import discover_project_context
 from bug_bounty_agent.learning import LearningStore
 from bug_bounty_agent.planner import build_checklist, build_plan
@@ -32,6 +33,7 @@ class AgentInput:
     policy_file: Path | None
     mode: str
     operator_id: str
+    run_automated: bool
 
 
 @dataclass
@@ -50,6 +52,9 @@ class AgentResult:
     recommendation_rationale: List[str]
     test_matrix: List[TestCase]
     test_matrix_path: str | None
+    automated_findings: List[AutomatedFinding]
+    automated_md_report: str | None
+    automated_pdf_report: str | None
 
 
 class BugBountyAgent:
@@ -93,6 +98,9 @@ class BugBountyAgent:
                 recommendation_rationale=[],
                 test_matrix=[],
                 test_matrix_path=None,
+                automated_findings=[],
+                automated_md_report=None,
+                automated_pdf_report=None,
             )
 
         url_error = self._validate_project_url(data.program_url)
@@ -126,6 +134,9 @@ class BugBountyAgent:
                 recommendation_rationale=[],
                 test_matrix=[],
                 test_matrix_path=None,
+                automated_findings=[],
+                automated_md_report=None,
+                automated_pdf_report=None,
             )
 
         discovery = discover_project_context(data.program_url, data.program_hint)
@@ -229,6 +240,17 @@ class BugBountyAgent:
         )
         notes.extend(analysis.notes)
 
+        automated = None
+        if data.run_automated:
+            automated = run_automated_tests(
+                discovery=discovery,
+                scope_data=scope_data,
+                operator_id=data.operator_id,
+            )
+            notes.extend(automated.notes)
+        else:
+            notes.append("Automated checks skipped (use --run-automated test).")
+
         rationale = [
             f"In-scope domains parsed: {len(discovery.in_scope_domains)}",
             f"Out-of-scope domains parsed: {len(discovery.out_scope_domains)}",
@@ -270,6 +292,9 @@ class BugBountyAgent:
             recommendation_rationale=rationale,
             test_matrix=analysis.tests,
             test_matrix_path=analysis.matrix_path,
+            automated_findings=automated.findings if automated else [],
+            automated_md_report=automated.markdown_report if automated else None,
+            automated_pdf_report=automated.pdf_report if automated else None,
         )
 
     @staticmethod
