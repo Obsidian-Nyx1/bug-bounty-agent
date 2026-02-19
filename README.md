@@ -4,19 +4,22 @@ Interactive bug bounty assistant focused on authorized testing workflows.
 
 ## What It Does
 
-- Prompts for a target program URL.
+- Shows startup instructions + interactive workflow menu (`1/2/3/4/a/q`).
 - Runs Step 1 intake:
   - gathers policy/scope/docs candidates,
-  - finds prior bug/write-up links,
-  - finds public social discussion links,
-  - extracts domain candidates.
-- Builds a terminal checklist (`done` vs `pending`).
-- Runs Step 2:
-  - recommends a domain to test next,
-  - labels in-scope/out-of-scope/unknown from scope patterns,
-  - suggests allowed vs blocked actions.
-- Saves a structured report per run.
-- Stores per-operator checkpoints (respawn point) for continuity.
+  - downloads HackerOne scope artifacts when available (`CSV` + Burp JSON),
+  - extracts in-scope/out-of-scope signals,
+  - finds prior bug/write-up links and social discussions.
+- Runs Step 2 recommendation:
+  - suggests next target,
+  - explains allowed vs blocked actions.
+- Runs Step 3 analysis:
+  - builds a 50-test matrix,
+  - prints scope label meanings in terminal for clarity.
+- Runs Step 4 compile-report view:
+  - sources, notes, report paths, automated artifacts.
+- Optional automated checks (`--run-automated test`) and optional scope-aware XSS step (`--xss_unified.py`).
+- Saves reports and per-operator checkpoints (respawn continuity).
 
 ## Safety Model
 
@@ -38,13 +41,32 @@ Non-interactive:
 ./bug_bounty --program-url https://hackerone.com/<program> --operator-id <name>
 ```
 
-With scope patterns:
+With scope/policy files:
 
 ```bash
 ./bug_bounty \
   --program-url https://hackerone.com/<program> \
   --scope-file scope.txt \
+  --policy-file policy.txt \
   --operator-id <name>
+```
+
+Run all output sections without the interactive menu:
+
+```bash
+./bug_bounty --program-url https://hackerone.com/<program> --non-interactive-output
+```
+
+Run built-in automated checks:
+
+```bash
+./bug_bounty --program-url https://hackerone.com/<program> --run-automated test
+```
+
+Run scope-aware unified XSS flow:
+
+```bash
+./bug_bounty --program-url https://hackerone.com/<program> --xss_unified.py
 ```
 
 ## Scope File Format
@@ -57,6 +79,15 @@ api.example.com
 !blog.example.com
 out-of-scope: support.example.com
 ```
+
+## Scope Labels (Step 3)
+
+- `verified_in_scope_from_policy_or_artifact`
+  - Explicitly in scope from policy/scope artifacts.
+- `verified_out_of_scope_from_policy_or_artifact`
+  - Explicitly out of scope from policy/scope artifacts.
+- `discovered_target_requires_scope_validation`
+  - Found during discovery but not explicitly verified yet.
 
 ## Optional AI (GitHub Models)
 
@@ -73,11 +104,28 @@ Optional model cap:
 export GITHUB_MODELS_MAX_MODELS=5
 ```
 
+## Unified XSS Scanner
+
+`xss_unified.py` supports both interactive and non-interactive modes.
+
+Non-interactive example:
+
+```bash
+python3 xss_unified.py --target https://example.com --depth 1 --output xss_report.json
+```
+
+Features:
+
+- Reflected/stored/DOM XSS probes.
+- WordPress detection (`/wp-admin/`, `/wp-content/`, `/wp-includes/`, `/wp-login.php`).
+- WordPress admin notice checks in `/wp-admin/` pages for risky HTML patterns.
+
 ## Output
 
 - Reports: `.bug_bounty_agent/reports/<operator-id>/...`
 - Checkpoints: `.bug_bounty_agent/checkpoints/<operator-id>/...`
 - Learning memory: `.bug_bounty_agent/learning_memory.jsonl`
+- Downloads: `.bug_bounty_agent/downloads/<program>/...`
 
 ## Repository
 
