@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Callable, List
 from urllib.parse import urlparse
 import ipaddress
 from datetime import datetime, timezone
@@ -34,6 +34,7 @@ class AgentInput:
     mode: str
     operator_id: str
     run_automated: bool
+    progress_callback: Callable[[int, str], None] | None = None
 
 
 @dataclass
@@ -61,6 +62,7 @@ class BugBountyAgent:
     """Execute when possible, otherwise provide a clear manual path."""
 
     def run(self, data: AgentInput) -> AgentResult:
+        self._progress(data, 4, "Validating input")
         if not data.program_url:
             memory = LearningStore(Path(".bug_bounty_agent/learning_memory.jsonl"))
             last_url = memory.get_last_program_url(data.operator_id)
@@ -139,7 +141,13 @@ class BugBountyAgent:
                 automated_pdf_report=None,
             )
 
-        discovery = discover_project_context(data.program_url, data.program_hint)
+        self._progress(data, 8, "Starting discovery and scope collection")
+        discovery = discover_project_context(
+            data.program_url,
+            data.program_hint,
+            progress_hook=data.progress_callback,
+        )
+        self._progress(data, 96, "Building plan, checklist, and report")
         memory = LearningStore(Path(".bug_bounty_agent/learning_memory.jsonl"))
         prior = memory.load_checkpoint(data.operator_id, discovery.project_key)
         prompt = discovery.as_prompt()
@@ -242,6 +250,7 @@ class BugBountyAgent:
 
         automated = None
         if data.run_automated:
+            self._progress(data, 97, "Running automated checks")
             automated = run_automated_tests(
                 discovery=discovery,
                 scope_data=scope_data,
@@ -276,6 +285,7 @@ class BugBountyAgent:
             )
         )
         notes.append(f"Intake report saved: {report_path}")
+        self._progress(data, 100, "Intake complete")
 
         return AgentResult(
             status="intake_complete",
@@ -296,6 +306,15 @@ class BugBountyAgent:
             automated_md_report=automated.markdown_report if automated else None,
             automated_pdf_report=automated.pdf_report if automated else None,
         )
+
+    @staticmethod
+    def _progress(data: AgentInput, pct: int, message: str) -> None:
+        if not data.progress_callback:
+            return
+        try:
+            data.progress_callback(max(0, min(100, pct)), message)
+        except Exception:
+            return
 
     @staticmethod
     def _validate_project_url(url: str) -> str | None:

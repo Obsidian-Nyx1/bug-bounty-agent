@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+from typing import Callable
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
@@ -23,6 +24,17 @@ TAB_SUFFIXES = [
     "collaborators",
     "safe_harbor",
 ]
+
+ProgressHook = Callable[[int, str], None]
+
+
+def _progress(hook: ProgressHook | None, pct: int, message: str) -> None:
+    if not hook:
+        return
+    try:
+        hook(max(0, min(100, pct)), message)
+    except Exception:
+        return
 
 
 class _LinkParser(HTMLParser):
@@ -447,7 +459,12 @@ def _extract_scope_signals_from_text(text: str) -> tuple[list[str], list[str]]:
     return allowed[:40], blocked[:40]
 
 
-def discover_project_context(project_url: str, program_hint: str | None = None) -> DiscoveryData:
+def discover_project_context(
+    project_url: str,
+    program_hint: str | None = None,
+    progress_hook: ProgressHook | None = None,
+) -> DiscoveryData:
+    _progress(progress_hook, 12, "Resolving project handle and fetching main page")
     parsed = urlparse(project_url)
     handle = _extract_h1_handle(project_url) or _normalize_handle_hint(program_hint)
     project_key = handle or (parsed.netloc or project_url).replace("www.", "").strip("/")
@@ -464,6 +481,7 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
     except Exception:
         pass
 
+    _progress(progress_hook, 20, "Classifying policy/scope/document links")
     policy, scope, docs = _classify_links(links)
 
     tab_links: list[str] = []
@@ -475,13 +493,16 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
     out_scope_signals: list[str] = []
 
     if handle:
+        _progress(progress_hook, 28, f"Program handle detected: {handle}")
         base = f"https://hackerone.com/{handle}"
         tab_links = [base if not suf else f"{base}/{suf}" for suf in TAB_SUFFIXES]
         download_dir = Path(".bug_bounty_agent/downloads") / project_key
+        _progress(progress_hook, 34, "Downloading scope CSV artifact")
         csv_file = _download_file(
             f"https://hackerone.com/teams/{handle}/assets/download_csv.csv",
             download_dir,
         )
+        _progress(progress_hook, 40, "Downloading Burp scope JSON artifact")
         burp_file = _download_file(
             f"https://hackerone.com/teams/{handle}/assets/download_burp_project_file.json",
             download_dir,
@@ -499,6 +520,7 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
                     )
 
         if csv_file:
+            _progress(progress_hook, 48, "Parsing CSV scope artifact")
             csv_in, csv_out, csv_allow, csv_block = _extract_domains_from_csv(Path(csv_file))
             for d in csv_in:
                 if d not in in_scope_domains:
@@ -514,6 +536,7 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
                     out_scope_signals.append(s)
 
         if burp_file:
+            _progress(progress_hook, 54, "Parsing Burp JSON scope artifact")
             b_in, b_out, b_allow, b_block = _extract_domains_from_burp_json(Path(burp_file))
             for d in b_in:
                 if d not in in_scope_domains:
@@ -529,6 +552,7 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
                     out_scope_signals.append(s)
 
         tab_text: list[str] = []
+        total_tabs = len(tab_links) if tab_links else 1
         for tab in tab_links:
             try:
                 tab_html = _fetch(tab)
@@ -536,6 +560,9 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
                 parser.feed(tab_html)
                 links.extend(parser.links)
                 tab_text.append(" ".join(parser.text_parts))
+                tab_done = len(tab_text)
+                pct = 58 + int((tab_done / total_tabs) * 16)
+                _progress(progress_hook, pct, f"Processed program tab {tab_done}/{total_tabs}")
             except Exception:
                 continue
         for text in tab_text:
@@ -552,9 +579,13 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
                 policy.append(candidate)
             if candidate not in scope:
                 scope.append(candidate)
+    else:
+        _progress(progress_hook, 30, "No program handle detected; using base page signals only")
 
+    _progress(progress_hook, 80, "Searching prior bug reports and social context")
     previous_bugs = _search_previous_bugs(project_url)
     social_links = _search_social_discussions(project_url)
+    _progress(progress_hook, 90, "Merging sources and extracting candidate targets")
     domain_candidates = _extract_domains_from_text(page_text + " " + " ".join(links))
     for d in in_scope_domains:
         if d not in domain_candidates:
@@ -577,6 +608,7 @@ def discover_project_context(project_url: str, program_hint: str | None = None) 
         if source and source not in seen:
             seen.add(source)
             uniq_sources.append(source)
+    _progress(progress_hook, 95, "Discovery complete")
 
     return DiscoveryData(
         project_url=project_url,

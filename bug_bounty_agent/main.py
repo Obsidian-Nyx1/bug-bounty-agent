@@ -150,6 +150,31 @@ def _show_start_instructions() -> None:
     )
 
 
+class _ProgressBar:
+    def __init__(self) -> None:
+        self.current = 0
+
+    def update(self, pct: int, message: str) -> None:
+        pct = max(self.current, max(0, min(100, pct)))
+        self.current = pct
+        width = 34
+        filled = int((pct / 100) * width)
+        bar = ("#" * filled) + ("-" * (width - filled))
+        text = message[:64]
+        sys.stdout.write(
+            "\r"
+            + _color("[Loading]", CYAN, bold=True)
+            + f" [{bar}] {pct:3d}% "
+            + _color(text, WHITE)
+        )
+        sys.stdout.flush()
+
+    def finish(self, message: str = "Ready") -> None:
+        self.update(100, message)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
 def _xss_targets_from_scope(result) -> tuple[list[str], list[str]]:
     candidates = list(result.scope_data.in_scope)
     valid: list[str] = []
@@ -357,6 +382,8 @@ def main() -> int:
         ).strip()
 
     agent = BugBountyAgent()
+    progress = _ProgressBar()
+    progress.update(2, "Preparing intake")
     result = agent.run(
         AgentInput(
             program_url=program_url or None,
@@ -366,8 +393,10 @@ def main() -> int:
             mode=args.mode,
             operator_id=args.operator_id,
             run_automated=(args.run_automated or "").strip().lower() == "test",
+            progress_callback=progress.update,
         )
     )
+    progress.finish("Intake finished")
 
     if args.run_xss_unified:
         return _run_xss_unified_scope_step(result, args.operator_id)
