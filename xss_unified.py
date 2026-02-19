@@ -88,6 +88,17 @@ def get_cookies_from_user():
                 cookies[name] = value
     return cookies
 
+
+def parse_cookies(cookie_str):
+    """Parse cookies from 'name=value; name2=value2' format."""
+    cookies = {}
+    if cookie_str:
+        for part in cookie_str.split(';'):
+            if '=' in part:
+                name, value = part.strip().split('=', 1)
+                cookies[name] = value
+    return cookies
+
 def is_same_domain(url, base_domain):
     """Check if URL belongs to the same domain as base_domain."""
     parsed = urlparse(url)
@@ -293,21 +304,9 @@ class XSSTester:
             self.driver.quit()
 
 # ===================== MAIN SCANNER =====================
-def main():
-    print("=== Unified XSS Scanner ===\n")
-    target = input("Enter target URL (e.g., https://example.com): ").strip()
+def run_scan(target, depth=2, use_headless=False, cookies=None):
     if not target.startswith('http'):
-        target = 'http://' + target
-
-    try:
-        depth = int(input("Crawl depth (default 2): ").strip() or "2")
-    except:
-        depth = 2
-
-    use_headless = ask_yes_no("Use headless browser for DOM XSS testing? (requires selenium and Chrome driver)")
-
-    cookies = get_cookies_from_user()
-
+        target = 'https://' + target
     print("\n[*] Starting reconnaissance...")
     crawler = Crawler(target, max_depth=depth, cookies=cookies)
     urls, forms = crawler.crawl()
@@ -401,7 +400,40 @@ def main():
     for f in findings['dom']:
         print(f"  - {f}")
 
-    output_file = input("\nSave report to file (optional, press Enter to skip): ").strip()
+    return findings
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Unified XSS Scanner")
+    parser.add_argument("--target", help="Target URL/domain to scan")
+    parser.add_argument("--depth", type=int, default=2, help="Crawler depth (default: 2)")
+    parser.add_argument("--headless", action="store_true", help="Enable headless DOM testing via selenium")
+    parser.add_argument("--cookies", default="", help="Cookies in 'name=value; name2=value2' format")
+    parser.add_argument("--output", default="", help="Output JSON report path")
+    args = parser.parse_args()
+
+    print("=== Unified XSS Scanner ===\n")
+    if args.target:
+        target = args.target.strip()
+        depth = max(0, args.depth)
+        use_headless = args.headless
+        cookies = parse_cookies(args.cookies)
+    else:
+        target = input("Enter target URL (e.g., https://example.com): ").strip()
+        if not target.startswith('http'):
+            target = 'http://' + target
+        try:
+            depth = int(input("Crawl depth (default 2): ").strip() or "2")
+        except:
+            depth = 2
+        use_headless = ask_yes_no("Use headless browser for DOM XSS testing? (requires selenium and Chrome driver)")
+        cookies = get_cookies_from_user()
+
+    findings = run_scan(target=target, depth=depth, use_headless=use_headless, cookies=cookies)
+
+    output_file = args.output.strip() if args.output else ""
+    if not output_file and not args.target:
+        output_file = input("\nSave report to file (optional, press Enter to skip): ").strip()
     if output_file:
         with open(output_file, 'w') as f:
             json.dump(findings, f, indent=2)

@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
@@ -21,6 +23,7 @@ YELLOW = "\033[38;5;220m"
 RED = "\033[38;5;196m"
 WHITE = "\033[38;5;255m"
 GRAY = "\033[38;5;245m"
+DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         "--xss_unified.py",
         dest="run_xss_unified",
         action="store_true",
-        help="Run the standalone xss_unified.py scanner and exit.",
+        help="Run scope-aware xss_unified.py scans using Step 1 in-scope targets.",
     )
     return parser.parse_args()
 
@@ -134,7 +137,7 @@ def _show_start_instructions() -> None:
             ["2", "Paste HackerOne program URL when prompted"],
             ["3", "Use menu: 1 intake, 2 scope, 3 analysis, 4 report, a all, q quit"],
             ["4", "Run automated checks: ./bug_bounty --run-automated test"],
-            ["5", "Run unified XSS tool: ./bug_bounty --xss_unified.py"],
+            ["5", "Run scope-aware XSS step: ./bug_bounty --xss_unified.py"],
         ],
     )
     _print_table(
@@ -145,6 +148,76 @@ def _show_start_instructions() -> None:
             ["Operator", "Use --operator-id to keep your learning/checkpoint profile stable."],
         ],
     )
+
+
+def _xss_targets_from_scope(result) -> tuple[list[str], list[str]]:
+    candidates = list(result.scope_data.in_scope)
+    valid: list[str] = []
+    skipped: list[str] = []
+    for item in candidates:
+        token = item.strip().lower()
+        if token.startswith("*."):
+            token = token[2:]
+        if DOMAIN_RE.match(token):
+            if token not in valid:
+                valid.append(token)
+        else:
+            skipped.append(item)
+    return valid, skipped
+
+
+def _run_xss_unified_scope_step(result, operator_id: str) -> int:
+    script_path = Path("xss_unified.py")
+    if not script_path.exists():
+        print(_color("[Error] xss_unified.py not found in project root.", RED, bold=True))
+        return 1
+
+    targets, skipped = _xss_targets_from_scope(result)
+    _print_section("Scope-Aware XSS Targets")
+    if targets:
+        _print_table(["#", "In-Scope Target", "XSS Step"], [[str(i), t, "eligible"] for i, t in enumerate(targets, start=1)])
+    else:
+        _print_table(["#", "In-Scope Target", "XSS Step"], [["1", "None", "No domain-like in-scope target found"]])
+    if skipped:
+        _print_table(["#", "Skipped (Non-domain Scope Item)"], [[str(i), s] for i, s in enumerate(skipped[:20], start=1)])
+
+    if not targets:
+        print(_color("[Note] No domain targets to run xss_unified.py against.", YELLOW, bold=True))
+        return 0
+
+    out_dir = Path(".bug_bounty_agent/reports") / operator_id / "xss_unified"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    failures = 0
+    max_targets = len(targets)
+
+    _print_section("Running Scope-Aware XSS Step")
+    print(_color(f"[Status] Running xss_unified.py for {max_targets} in-scope target(s).", CYAN, bold=True))
+    for idx, target in enumerate(targets[:max_targets], start=1):
+        out_file = out_dir / f"{target.replace('.', '_')}_{timestamp}.json"
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--target",
+            f"https://{target}",
+            "--depth",
+            "1",
+            "--output",
+            str(out_file),
+        ]
+        print(_color(f"[XSS {idx}/{max_targets}] {target}", WHITE, bold=True))
+        proc = subprocess.run(cmd, check=False)
+        if proc.returncode != 0:
+            failures += 1
+            print(_color(f"  -> failed (exit {proc.returncode})", RED, bold=True))
+        else:
+            print(_color(f"  -> report: {out_file}", GREEN, bold=True))
+
+    if failures:
+        print(_color(f"[Status] XSS step completed with {failures} failure(s).", YELLOW, bold=True))
+        return 1
+    print(_color("[Status] XSS step completed successfully.", GREEN, bold=True))
+    return 0
 
 
 def _render_step_1(result) -> None:
@@ -259,15 +332,6 @@ def main() -> int:
     print("\n[Status] Starting ./bug_bounty\n")
     _show_start_instructions()
 
-    if args.run_xss_unified:
-        script_path = Path("xss_unified.py")
-        if not script_path.exists():
-            print(_color("[Error] xss_unified.py not found in project root.", RED, bold=True))
-            return 1
-        print(_color("[Status] Launching xss_unified.py", CYAN, bold=True))
-        result = subprocess.run([sys.executable, str(script_path)], check=False)
-        return result.returncode
-
     program_url = args.program_url
     if not program_url and not args.no_prompt:
         program_url = input("[Input] Paste project URL: ").strip()
@@ -294,6 +358,9 @@ def main() -> int:
             run_automated=(args.run_automated or "").strip().lower() == "test",
         )
     )
+
+    if args.run_xss_unified:
+        return _run_xss_unified_scope_step(result, args.operator_id)
 
     if args.non_interactive_output:
         _render_all_steps(result)
