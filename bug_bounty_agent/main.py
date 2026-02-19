@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("BUG_BOUNTY_OPERATOR", os.getenv("USER", "default-operator")),
         help="Stable operator identity used for learning/respawn checkpoints.",
     )
+    parser.add_argument(
+        "--non-interactive-output",
+        action="store_true",
+        help="Print all sections at once instead of interactive menu mode.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +95,118 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     print(_color(border, GRAY))
 
 
+def _show_workflow_menu() -> None:
+    _print_section("Workflow Menu")
+    _print_table(
+        ["Input", "Action"],
+        [
+            ["1", "Intake Program Information"],
+            ["2", "Scope Recommendation"],
+            ["3", "Analyze Information and Generate Test Matrix"],
+            ["4", "Compile Report (sources + notes + paths)"],
+            ["a", "Show all sections"],
+            ["q", "Quit"],
+        ],
+    )
+
+
+def _render_step_1(result) -> None:
+    _print_section("1) Intake Program Information")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["Status", result.status],
+            ["Summary", result.summary],
+            ["Report", result.report_path or "Not generated"],
+        ],
+    )
+
+
+def _render_step_2(result) -> None:
+    _print_section("2) Scope Recommendation")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["Domain", result.recommendation.domain or "None"],
+            ["Scope Status", result.recommendation.status],
+            ["Reason", result.recommendation.reason],
+        ],
+    )
+    if result.recommendation.allowed_tests:
+        _print_table(
+            ["Allowed Next Tests", "Details"],
+            [[str(idx), item] for idx, item in enumerate(result.recommendation.allowed_tests, start=1)],
+        )
+    if result.recommendation.blocked_tests:
+        _print_table(
+            ["Blocked / Not Allowed", "Details"],
+            [[str(idx), item] for idx, item in enumerate(result.recommendation.blocked_tests, start=1)],
+        )
+    _print_section("2) Why This Recommendation")
+    _print_table(
+        ["#", "Evidence"],
+        [[str(idx), item] for idx, item in enumerate(result.recommendation_rationale, start=1)] or [["1", "No evidence available"]],
+    )
+
+
+def _render_step_3(result) -> None:
+    _print_section("3) Analyze Information and Build Test Matrix")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["Total Tests", str(len(result.test_matrix))],
+            ["Matrix File", result.test_matrix_path or "Not generated"],
+        ],
+    )
+    if result.test_matrix:
+        _print_table(
+            ["ID", "Category", "Test", "Target", "Scope"],
+            [[t.test_id, t.category, t.test_name, t.target, t.scope_basis] for t in result.test_matrix[:50]],
+        )
+    else:
+        _print_table(["ID", "Category", "Test", "Target", "Scope"], [["-", "-", "No tests generated", "-", "-"]])
+
+    _print_section("3) Downloaded Artifacts")
+    if result.downloaded_artifact_reasons:
+        _print_table(
+            ["#", "Downloaded File and Reason"],
+            [[str(idx), item] for idx, item in enumerate(result.downloaded_artifact_reasons, start=1)],
+        )
+    else:
+        _print_table(["#", "Downloaded File and Reason"], [["1", "None downloaded in this run"]])
+
+    _print_section("3) Checklist")
+    checklist_rows: list[list[str]] = []
+    for item in result.completed:
+        checklist_rows.append([_color("DONE", GREEN, bold=True), item])
+    for item in result.pending:
+        checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
+    _print_table(["Status", "Task"], checklist_rows)
+
+    _print_section("3) Next Actions")
+    _print_table(["#", "Action"], [[str(idx), item] for idx, item in enumerate(result.suggestions, start=1)])
+
+
+def _render_step_4(result) -> None:
+    _print_section("4) Compile Report: Sources Used")
+    source_rows = [[str(idx), item] for idx, item in enumerate(result.sources, start=1)]
+    _print_table(["#", "Source"], source_rows or [["1", "No sources found in this run"]])
+
+    _print_section("4) Compile Report: Notes")
+    note_rows = [[str(idx), item] for idx, item in enumerate(result.notes, start=1)]
+    _print_table(["#", "Note"], note_rows or [["1", "No notes"]])
+
+    if result.report_path:
+        print(_color(f"\n[Report Saved] {result.report_path}", CYAN, bold=True))
+
+
+def _render_all_steps(result) -> None:
+    _render_step_1(result)
+    _render_step_2(result)
+    _render_step_3(result)
+    _render_step_4(result)
+
+
 def main() -> int:
     args = parse_args()
     print(render_banner())
@@ -121,101 +238,29 @@ def main() -> int:
         )
     )
 
-    _print_section("Workflow")
-    _print_table(
-        ["Step", "Action"],
-        [
-            ["1)", "Intake Program Information"],
-            ["2)", "Review Scope and Recommend Target/Test Direction"],
-            ["3)", "Analyze Artifacts and Generate Test Matrix"],
-            ["4)", "Compile and Save Report"],
-            ["Quit", "Exit after reviewing checklist and next actions"],
-        ],
-    )
+    if args.non_interactive_output:
+        _render_all_steps(result)
+        print(_color("[Quit] Non-interactive run complete.", RED, bold=True))
+        return 0
 
-    _print_section("1) Intake Program Information")
-    overview_rows = [
-        ["Status", result.status],
-        ["Summary", result.summary],
-        ["Report", result.report_path or "Not generated"],
-    ]
-    _print_table(["Field", "Value"], overview_rows)
-
-    _print_section("2) Scope Recommendation")
-    rec_rows = [
-        ["Domain", result.recommendation.domain or "None"],
-        ["Scope Status", result.recommendation.status],
-        ["Reason", result.recommendation.reason],
-    ]
-    _print_table(["Field", "Value"], rec_rows)
-
-    if result.recommendation.allowed_tests:
-        _print_table(
-            ["Allowed Next Tests", "Details"],
-            [[str(idx), item] for idx, item in enumerate(result.recommendation.allowed_tests, start=1)],
-        )
-    if result.recommendation.blocked_tests:
-        _print_table(
-            ["Blocked / Not Allowed", "Details"],
-            [[str(idx), item] for idx, item in enumerate(result.recommendation.blocked_tests, start=1)],
-        )
-
-    _print_section("2) Why This Recommendation")
-    rationale_rows = [[str(idx), item] for idx, item in enumerate(result.recommendation_rationale, start=1)]
-    if rationale_rows:
-        _print_table(["#", "Evidence"], rationale_rows)
-
-    _print_section("3) Analyze Information and Build Test Matrix")
-    matrix_rows = [
-        ["Total Tests", str(len(result.test_matrix))],
-        ["Matrix File", result.test_matrix_path or "Not generated"],
-    ]
-    _print_table(["Field", "Value"], matrix_rows)
-    if result.test_matrix:
-        preview_rows = [
-            [t.test_id, t.category, t.test_name, t.target, t.scope_basis]
-            for t in result.test_matrix[:50]
-        ]
-        _print_table(["ID", "Category", "Test", "Target", "Scope"], preview_rows)
-    else:
-        _print_table(["ID", "Category", "Test", "Target", "Scope"], [["-", "-", "No tests generated", "-", "-"]])
-
-    _print_section("3) Downloaded Artifacts")
-    if result.downloaded_artifact_reasons:
-        artifact_rows = [[str(idx), item] for idx, item in enumerate(result.downloaded_artifact_reasons, start=1)]
-        _print_table(["#", "Downloaded File and Reason"], artifact_rows)
-    else:
-        _print_table(["#", "Downloaded File and Reason"], [["1", "None downloaded in this run"]])
-
-    _print_section("3) Checklist")
-    checklist_rows: list[list[str]] = []
-    for item in result.completed:
-        checklist_rows.append([_color("DONE", GREEN, bold=True), item])
-    for item in result.pending:
-        checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
-    _print_table(["Status", "Task"], checklist_rows)
-
-    _print_section("3) Next Actions")
-    action_rows = [[str(idx), item] for idx, item in enumerate(result.suggestions, start=1)]
-    _print_table(["#", "Action"], action_rows)
-
-    _print_section("4) Compile Report: Sources Used")
-    source_rows = [[str(idx), item] for idx, item in enumerate(result.sources, start=1)]
-    if source_rows:
-        _print_table(["#", "Source"], source_rows)
-    else:
-        _print_table(["#", "Source"], [["1", "No sources found in this run"]])
-
-    _print_section("4) Compile Report: Notes")
-    note_rows = [[str(idx), item] for idx, item in enumerate(result.notes, start=1)]
-    if note_rows:
-        _print_table(["#", "Note"], note_rows)
-    else:
-        _print_table(["#", "Note"], [["1", "No notes"]])
-
-    if result.report_path:
-        print(_color(f"\n[Report Saved] {result.report_path}", CYAN, bold=True))
-    print(_color("[Quit] Press Ctrl+C or close terminal when finished.", RED, bold=True))
+    while True:
+        _show_workflow_menu()
+        choice = input(_color("Select a step (1/2/3/4/a/q): ", CYAN, bold=True)).strip().lower()
+        if choice == "1":
+            _render_step_1(result)
+        elif choice == "2":
+            _render_step_2(result)
+        elif choice == "3":
+            _render_step_3(result)
+        elif choice == "4":
+            _render_step_4(result)
+        elif choice == "a":
+            _render_all_steps(result)
+        elif choice == "q":
+            print(_color("[Quit] Session ended.", RED, bold=True))
+            break
+        else:
+            print(_color("Invalid choice. Use 1, 2, 3, 4, a, or q.", RED, bold=True))
     return 0
 
 
