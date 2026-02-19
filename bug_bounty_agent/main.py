@@ -7,6 +7,8 @@ import argparse
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
@@ -62,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print all sections at once instead of interactive menu mode.",
     )
+    parser.add_argument(
+        "--xss_unified.py",
+        dest="run_xss_unified",
+        action="store_true",
+        help="Run the standalone xss_unified.py scanner and exit.",
+    )
     return parser.parse_args()
 
 
@@ -113,6 +121,28 @@ def _show_workflow_menu() -> None:
             ["4", "Compile Report (sources + notes + paths)"],
             ["a", "Show all sections"],
             ["q", "Quit"],
+        ],
+    )
+
+
+def _show_start_instructions() -> None:
+    _print_section("Quick Instructions")
+    _print_table(
+        ["Step", "Command / Action"],
+        [
+            ["1", "Start guided workflow: ./bug_bounty"],
+            ["2", "Paste HackerOne program URL when prompted"],
+            ["3", "Use menu: 1 intake, 2 scope, 3 analysis, 4 report, a all, q quit"],
+            ["4", "Run automated checks: ./bug_bounty --run-automated test"],
+            ["5", "Run unified XSS tool: ./bug_bounty --xss_unified.py"],
+        ],
+    )
+    _print_table(
+        ["Notes", "Details"],
+        [
+            ["Scope Safety", "Only test verified in-scope assets."],
+            ["Reports", "Results are saved under .bug_bounty_agent/reports/<operator>/"],
+            ["Operator", "Use --operator-id to keep your learning/checkpoint profile stable."],
         ],
     )
 
@@ -227,6 +257,16 @@ def main() -> int:
     args = parse_args()
     print(render_banner())
     print("\n[Status] Starting ./bug_bounty\n")
+    _show_start_instructions()
+
+    if args.run_xss_unified:
+        script_path = Path("xss_unified.py")
+        if not script_path.exists():
+            print(_color("[Error] xss_unified.py not found in project root.", RED, bold=True))
+            return 1
+        print(_color("[Status] Launching xss_unified.py", CYAN, bold=True))
+        result = subprocess.run([sys.executable, str(script_path)], check=False)
+        return result.returncode
 
     program_url = args.program_url
     if not program_url and not args.no_prompt:
