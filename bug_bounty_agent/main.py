@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
+from bug_bounty_agent.bootstrap import ensure_runtime_dependencies
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -73,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run scope-aware xss_unified.py scans using Step 1 in-scope targets.",
     )
+    parser.add_argument(
+        "--no-auto-install-deps",
+        action="store_true",
+        help="Disable automatic runtime dependency installation.",
+    )
     return parser.parse_args()
 
 
@@ -118,12 +124,35 @@ def _show_workflow_menu() -> None:
     _print_table(
         ["Input", "Action"],
         [
-            ["1", "Intake Program Information"],
-            ["2", "Scope Recommendation"],
-            ["3", "Analyze Information and Generate Test Matrix"],
-            ["4", "Compile Report (sources + notes + paths)"],
-            ["a", "Show all sections"],
+            ["1", "RECON (Mandatory): URL intake + scope/download discovery"],
+            ["2", "TESTS: choose which automated test to run"],
+            ["3", "REPORTING: save downloaded-doc manifest or custom report"],
             ["q", "Quit"],
+        ],
+    )
+
+
+def _show_test_mode_menu() -> None:
+    _print_section("TESTS Module")
+    _print_table(
+        ["Input", "Mode"],
+        [
+            ["l", "List available tests"],
+            ["x", "Run scope-aware XSS test (xss_unified.py)"],
+            ["b", "Back to main menu"],
+        ],
+    )
+
+
+def _show_reporting_menu() -> None:
+    _print_section("REPORTING Module")
+    _print_table(
+        ["Input", "Action"],
+        [
+            ["d", "Save downloaded-documents manifest"],
+            ["c", "Create a custom report note"],
+            ["v", "View current compiled report details"],
+            ["b", "Back to main menu"],
         ],
     )
 
@@ -135,7 +164,7 @@ def _show_start_instructions() -> None:
         [
             ["1", "Start guided workflow: ./bug_bounty"],
             ["2", "Paste HackerOne program URL when prompted"],
-            ["3", "Use menu: 1 intake, 2 scope, 3 analysis, 4 report, a all, q quit"],
+            ["3", "Use menu: 1 RECON, 2 TESTS, 3 REPORTING, q quit"],
             ["4", "Run automated checks: ./bug_bounty --run-automated test"],
             ["5", "Run scope-aware XSS step: ./bug_bounty --xss_unified.py"],
         ],
@@ -257,6 +286,26 @@ def _render_step_1(result) -> None:
     )
 
 
+def _render_recon(result) -> None:
+    _render_step_1(result)
+    _render_step_2(result)
+    _print_section("RECON: Downloaded Artifacts")
+    if result.downloaded_artifact_reasons:
+        _print_table(
+            ["#", "Downloaded File and Reason"],
+            [[str(idx), item] for idx, item in enumerate(result.downloaded_artifact_reasons, start=1)],
+        )
+    else:
+        _print_table(["#", "Downloaded File and Reason"], [["1", "None downloaded in this run"]])
+    _print_section("RECON: Checklist")
+    checklist_rows: list[list[str]] = []
+    for item in result.completed:
+        checklist_rows.append([_color("DONE", GREEN, bold=True), item])
+    for item in result.pending:
+        checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
+    _print_table(["Status", "Task"], checklist_rows)
+
+
 def _render_step_2(result) -> None:
     _print_section("2) Scope Recommendation")
     _print_table(
@@ -354,6 +403,69 @@ def _render_step_4(result) -> None:
     )
 
 
+def _render_documentation(result) -> None:
+    _print_section("Documentation Review")
+    source_rows = [[str(idx), item] for idx, item in enumerate(result.sources, start=1)]
+    _print_table(["#", "Source"], source_rows or [["1", "No sources found in this run"]])
+    _print_table(
+        ["Artifact", "Path / Value"],
+        [
+            ["Intake Report", result.report_path or "Not generated"],
+            ["Matrix CSV", result.test_matrix_path or "Not generated"],
+            ["Automated Markdown", result.automated_md_report or "Not generated"],
+            ["Automated PDF", result.automated_pdf_report or "Not generated"],
+        ],
+    )
+    note_rows = [[str(idx), item] for idx, item in enumerate(result.notes, start=1)]
+    _print_table(["#", "Notes"], note_rows[:20] or [["1", "No notes"]])
+
+
+def _save_download_manifest(result, operator_id: str) -> str:
+    out_dir = Path(".bug_bounty_agent/reports") / operator_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    out_file = out_dir / f"download_manifest_{timestamp}.md"
+    lines = [
+        "# Downloaded Documents Manifest",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Downloaded Artifacts",
+    ]
+    if result.downloaded_artifact_reasons:
+        lines.extend([f"- {item}" for item in result.downloaded_artifact_reasons])
+    else:
+        lines.append("- None downloaded in this run.")
+    lines.extend(["", "## Source Links"])
+    if result.sources:
+        lines.extend([f"- {item}" for item in result.sources])
+    else:
+        lines.append("- No sources recorded.")
+    out_file.write_text("\n".join(lines), encoding="utf-8")
+    return str(out_file)
+
+
+def _save_custom_report(operator_id: str) -> str | None:
+    title = input(_color("Custom report title: ", CYAN, bold=True)).strip() or "Custom Report"
+    note = input(_color("Custom report note: ", CYAN, bold=True)).strip()
+    if not note:
+        return None
+    out_dir = Path(".bug_bounty_agent/reports") / operator_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    out_file = out_dir / f"custom_report_{timestamp}.md"
+    lines = [
+        f"# {title}",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Note",
+        note,
+    ]
+    out_file.write_text("\n".join(lines), encoding="utf-8")
+    return str(out_file)
+
+
 def _render_all_steps(result) -> None:
     _render_step_1(result)
     _render_step_2(result)
@@ -366,6 +478,17 @@ def main() -> int:
     print(render_banner())
     print("\n[Status] Starting ./bug_bounty\n")
     _show_start_instructions()
+
+    deps = ensure_runtime_dependencies(
+        include_optional=bool(args.run_xss_unified),
+        auto_install=not args.no_auto_install_deps,
+    )
+    if deps.notes:
+        _print_section("Runtime Dependencies")
+        _print_table(["Status", "Details"], [[("OK" if deps.ok else "WARN"), note] for note in deps.notes])
+    if not deps.ok:
+        print(_color("[Error] Missing required runtime dependencies. Re-run with network access or install manually.", RED, bold=True))
+        return 1
 
     program_url = args.program_url
     if not program_url and not args.no_prompt:
@@ -406,24 +529,71 @@ def main() -> int:
         print(_color("[Quit] Non-interactive run complete.", RED, bold=True))
         return 0
 
+    intake_viewed = True
+    tests_done = False
+    _render_recon(result)
+
     while True:
         _show_workflow_menu()
-        choice = input(_color("Select a step (1/2/3/4/a/q): ", CYAN, bold=True)).strip().lower()
+        choice = input(_color("Select a step (1/2/3/q): ", CYAN, bold=True)).strip().lower()
         if choice == "1":
-            _render_step_1(result)
+            _render_recon(result)
+            intake_viewed = True
         elif choice == "2":
-            _render_step_2(result)
+            if not intake_viewed:
+                print(_color("RECON is mandatory. Complete step 1 first.", RED, bold=True))
+                continue
+            while True:
+                _show_test_mode_menu()
+                mode_choice = input(_color("Choose mode (l/x/b): ", CYAN, bold=True)).strip().lower()
+                if mode_choice == "l":
+                    _print_section("Available Tests")
+                    _print_table(
+                        ["ID", "Test", "Status"],
+                        [
+                            ["XSS-01", "scope-aware xss_unified.py", "available"],
+                            ["NEXT", "future tests you add later", "placeholder"],
+                        ],
+                    )
+                elif mode_choice == "x":
+                    _render_step_2(result)
+                    rc = _run_xss_unified_scope_step(result, args.operator_id)
+                    if rc == 0:
+                        tests_done = True
+                elif mode_choice == "b":
+                    break
+                else:
+                    print(_color("Invalid mode. Use l, x, or b.", RED, bold=True))
         elif choice == "3":
-            _render_step_3(result)
-        elif choice == "4":
-            _render_step_4(result)
-        elif choice == "a":
-            _render_all_steps(result)
+            if not intake_viewed:
+                print(_color("Run RECON first.", YELLOW, bold=True))
+                continue
+            while True:
+                _show_reporting_menu()
+                r_choice = input(_color("Choose action (d/c/v/b): ", CYAN, bold=True)).strip().lower()
+                if r_choice == "d":
+                    out = _save_download_manifest(result, args.operator_id)
+                    print(_color(f"[Saved] Download manifest: {out}", GREEN, bold=True))
+                elif r_choice == "c":
+                    out = _save_custom_report(args.operator_id)
+                    if out:
+                        print(_color(f"[Saved] Custom report: {out}", GREEN, bold=True))
+                    else:
+                        print(_color("[Note] Custom report was not saved (empty note).", YELLOW, bold=True))
+                elif r_choice == "v":
+                    if not tests_done:
+                        print(_color("[Note] No test execution recorded yet. Showing current compiled details.", YELLOW, bold=True))
+                    _render_step_4(result)
+                    _render_documentation(result)
+                elif r_choice == "b":
+                    break
+                else:
+                    print(_color("Invalid action. Use d, c, v, or b.", RED, bold=True))
         elif choice == "q":
             print(_color("[Quit] Session ended.", RED, bold=True))
             break
         else:
-            print(_color("Invalid choice. Use 1, 2, 3, 4, a, or q.", RED, bold=True))
+            print(_color("Invalid choice. Use 1, 2, 3, or q.", RED, bold=True))
     return 0
 
 

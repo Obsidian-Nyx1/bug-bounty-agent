@@ -35,6 +35,8 @@ chmod +x ./bug_bounty
 ./bug_bounty
 ```
 
+On startup, the agent now checks required Python dependencies and auto-installs missing ones for the current interpreter.
+
 Non-interactive:
 
 ```bash
@@ -67,6 +69,12 @@ Run scope-aware unified XSS flow:
 
 ```bash
 ./bug_bounty --program-url https://hackerone.com/<program> --xss_unified.py
+```
+
+Disable dependency auto-install:
+
+```bash
+./bug_bounty --no-auto-install-deps
 ```
 
 ## Scope File Format
