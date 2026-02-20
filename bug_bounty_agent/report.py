@@ -59,7 +59,7 @@ def write_intake_report(data: ReportData) -> Path:
     if data.test_matrix:
         lines.append("| ID | Category | Test | Target | Scope Basis |")
         lines.append("|---|---|---|---|---|")
-        for test in data.test_matrix[:50]:
+        for test in data.test_matrix[:100]:
             lines.append(
                 f"| {test.test_id} | {test.category} | {test.test_name} | "
                 f"{test.target} | {test.scope_basis} |"

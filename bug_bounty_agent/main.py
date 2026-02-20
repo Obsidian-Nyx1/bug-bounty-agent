@@ -221,10 +221,25 @@ class _ProgressBar:
         sys.stdout.flush()
 
 
-def _xss_targets_from_scope(result) -> tuple[list[str], list[str]]:
+def _xss_targets_from_scope(result) -> tuple[list[str], list[str], list[str]]:
     candidates = list(result.scope_data.in_scope)
+    candidate_sources: list[str] = []
+    for item in result.scope_data.in_scope:
+        candidate_sources.append(f"{item} <- recon_scope")
+    for test in result.test_matrix:
+        if test.category.strip().lower() != "xss":
+            continue
+        if "verified_in_scope" not in (test.scope_basis or ""):
+            continue
+        candidates.append(test.target)
+        candidate_sources.append(f"{test.target} <- suggested_test_{test.test_id}")
+    if result.recommendation and result.recommendation.domain:
+        candidates.append(result.recommendation.domain)
+        candidate_sources.append(f"{result.recommendation.domain} <- recommendation")
+
     valid: list[str] = []
     skipped: list[str] = []
+    used_sources: list[str] = []
     for item in candidates:
         token = item.strip().lower()
         if token.startswith("*."):
@@ -232,9 +247,13 @@ def _xss_targets_from_scope(result) -> tuple[list[str], list[str]]:
         if DOMAIN_RE.match(token):
             if token not in valid:
                 valid.append(token)
+                for src in candidate_sources:
+                    if src.startswith(item) or src.startswith(token):
+                        used_sources.append(src)
+                        break
         else:
             skipped.append(item)
-    return valid, skipped
+    return valid, skipped, used_sources
 
 
 def _run_xss_unified_scope_step(result, operator_id: str) -> int:
@@ -243,7 +262,7 @@ def _run_xss_unified_scope_step(result, operator_id: str) -> int:
         print(_color("[Error] xss_unified.py not found in project root.", RED, bold=True))
         return 1
 
-    targets, skipped = _xss_targets_from_scope(result)
+    targets, skipped, sources = _xss_targets_from_scope(result)
     _print_section("Scope-Aware XSS Targets")
     if targets:
         _print_table(["#", "In-Scope Target", "XSS Step"], [[str(i), t, "eligible"] for i, t in enumerate(targets, start=1)])
@@ -251,6 +270,8 @@ def _run_xss_unified_scope_step(result, operator_id: str) -> int:
         _print_table(["#", "In-Scope Target", "XSS Step"], [["1", "None", "No domain-like in-scope target found"]])
     if skipped:
         _print_table(["#", "Skipped (Non-domain Scope Item)"], [[str(i), s] for i, s in enumerate(skipped[:20], start=1)])
+    if sources:
+        _print_table(["#", "Target Source"], [[str(i), s] for i, s in enumerate(sources[:30], start=1)])
 
     if not targets:
         print(_color("[Note] No domain targets to run xss_unified.py against.", YELLOW, bold=True))
@@ -362,7 +383,7 @@ def _render_step_3(result) -> None:
     if result.test_matrix:
         _print_table(
             ["ID", "Category", "Test", "Target", "Scope"],
-            [[t.test_id, t.category, t.test_name, t.target, t.scope_basis] for t in result.test_matrix[:50]],
+            [[t.test_id, t.category, t.test_name, t.target, t.scope_basis] for t in result.test_matrix[:100]],
         )
     else:
         _print_table(["ID", "Category", "Test", "Target", "Scope"], [["-", "-", "No tests generated", "-", "-"]])
@@ -403,7 +424,7 @@ def _render_suggested_tests_table(result) -> None:
     if result.test_matrix:
         _print_table(
             ["ID", "Category", "Test", "Target", "Scope"],
-            [[t.test_id, t.category, t.test_name, t.target, t.scope_basis] for t in result.test_matrix[:50]],
+            [[t.test_id, t.category, t.test_name, t.target, t.scope_basis] for t in result.test_matrix[:100]],
         )
         _print_table(
             ["Field", "Value"],

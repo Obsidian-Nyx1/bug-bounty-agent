@@ -243,7 +243,7 @@ class BugBountyAgent:
             discovery=discovery,
             scope_data=scope_data,
             ai_ideas=idea_result.ideas,
-            target_count=50,
+            target_count=100,
             operator_id=data.operator_id,
         )
         notes.extend(analysis.notes)
