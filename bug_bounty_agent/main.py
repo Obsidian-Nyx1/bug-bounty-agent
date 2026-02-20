@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -335,7 +336,7 @@ def _ensure_afrog_installed() -> Optional[str]:
     return _find_afrog_binary()
 
 
-def _run_afrog_safe_step(result, operator_id: str) -> int:
+def _run_afrog_safe_step(result, operator_id: str, session_state: Optional[dict] = None) -> int:
     _print_section("Afrog Instructions")
     _print_table(
         ["Step", "What Happens"],
@@ -401,6 +402,10 @@ def _run_afrog_safe_step(result, operator_id: str) -> int:
             proc.stderr or "",
         ]
         out_file.write_text("\n".join(output), encoding="utf-8")
+        if session_state is not None:
+            session_state.setdefault("tested_targets", []).append({"tool": "afrog", "target": target})
+            session_state.setdefault("artifacts", []).append(str(out_file))
+            session_state.setdefault("findings", []).extend(_extract_afrog_findings(out_file, target))
         if proc.returncode != 0:
             failures += 1
             print(_color(f"  -> failed (exit {proc.returncode}); log: {out_file}", RED, bold=True))
@@ -415,7 +420,7 @@ def _run_afrog_safe_step(result, operator_id: str) -> int:
     return 0
 
 
-def _run_xss_unified_scope_step(result, operator_id: str) -> int:
+def _run_xss_unified_scope_step(result, operator_id: str, session_state: Optional[dict] = None) -> int:
     script_path = Path("xss_unified.py")
     if not script_path.exists():
         print(_color("[Error] xss_unified.py not found in project root.", RED, bold=True))
@@ -459,6 +464,10 @@ def _run_xss_unified_scope_step(result, operator_id: str) -> int:
         ]
         print(_color(f"[XSS {idx}/{max_targets}] {target}", WHITE, bold=True))
         proc = subprocess.run(cmd, check=False)
+        if session_state is not None:
+            session_state.setdefault("tested_targets", []).append({"tool": "xss_unified", "target": target})
+            session_state.setdefault("artifacts", []).append(str(out_file))
+            session_state.setdefault("findings", []).extend(_extract_xss_findings(out_file, target))
         if proc.returncode != 0:
             failures += 1
             print(_color(f"  -> failed (exit {proc.returncode})", RED, bold=True))
@@ -470,6 +479,141 @@ def _run_xss_unified_scope_step(result, operator_id: str) -> int:
         return 1
     print(_color("[Status] XSS step completed successfully.", GREEN, bold=True))
     return 0
+
+
+def _extract_xss_findings(report_file: Path, target: str) -> list[dict]:
+    findings: list[dict] = []
+    if not report_file.exists():
+        return findings
+    try:
+        data = json.loads(report_file.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return findings
+
+    mapping = {
+        "reflected": "medium",
+        "stored": "high",
+        "dom": "high",
+        "wordpress_admin_notices": "medium",
+    }
+    for key, severity in mapping.items():
+        values = data.get(key, [])
+        if not values:
+            continue
+        for item in values[:20]:
+            if isinstance(item, dict):
+                evidence = item.get("url") or item.get("found_at") or str(item)
+            else:
+                evidence = str(item)
+            findings.append(
+                {
+                    "tool": "xss_unified",
+                    "target": target,
+                    "category": key,
+                    "severity": severity,
+                    "evidence": evidence,
+                    "line_of_code": "N/A (black-box web test evidence)",
+                    "artifact": str(report_file),
+                }
+            )
+    return findings
+
+
+def _extract_afrog_findings(report_file: Path, target: str) -> list[dict]:
+    findings: list[dict] = []
+    if not report_file.exists():
+        return findings
+    text = report_file.read_text(encoding="utf-8", errors="ignore")
+    lowered = text.lower()
+    if any(token in lowered for token in ("critical", " high ", "vulnerable", "[+]", "cve-")):
+        sample = []
+        for line in text.splitlines():
+            low = line.lower()
+            if any(token in low for token in ("critical", " high ", "vulnerable", "cve-")):
+                sample.append(line.strip())
+            if len(sample) >= 5:
+                break
+        findings.append(
+            {
+                "tool": "afrog",
+                "target": target,
+                "category": "baseline_scan_signal",
+                "severity": "medium",
+                "evidence": "; ".join(sample) if sample else "Potential vulnerability indicators in afrog output.",
+                "line_of_code": "N/A (scanner output evidence)",
+                "artifact": str(report_file),
+            }
+        )
+    return findings
+
+
+def _generate_automatic_report(result, operator_id: str, session_state: dict) -> str:
+    out_dir = Path(".bug_bounty_agent/reports") / operator_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    out_file = out_dir / f"auto_session_report_{timestamp}.md"
+
+    tested = session_state.get("tested_targets", [])
+    artifacts = session_state.get("artifacts", [])
+    steps = session_state.get("steps", [])
+    findings = session_state.get("findings", [])
+
+    severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+    findings_sorted = sorted(findings, key=lambda x: severity_rank.get(str(x.get("severity", "info")).lower(), 1), reverse=True)
+
+    lines = [
+        "# Automatic Testing Session Report",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"- Program URL: {session_state.get('program_url') or 'N/A'}",
+        f"- RECON completed: {'yes' if session_state.get('recon_done') else 'no'}",
+        f"- Tests executed: {len(tested)}",
+        f"- Findings highlighted: {len(findings_sorted)}",
+        "",
+        "## Steps Completed",
+    ]
+    if steps:
+        lines.extend([f"- {s}" for s in steps])
+    else:
+        lines.append("- No recorded step history.")
+
+    lines.extend(["", "## Tested Targets"])
+    if tested:
+        for item in tested:
+            lines.append(f"- `{item.get('tool')}` -> `{item.get('target')}`")
+    else:
+        lines.append("- No tests executed yet.")
+
+    lines.extend(["", "## Highlighted Findings"])
+    if findings_sorted:
+        lines.append("| Severity | Tool | Category | Target | Evidence | Line/Code |")
+        lines.append("|---|---|---|---|---|---|")
+        for f in findings_sorted[:200]:
+            sev = str(f.get("severity", "info")).upper()
+            lines.append(
+                f"| **{sev}** | {f.get('tool','n/a')} | {f.get('category','n/a')} | {f.get('target','n/a')} | "
+                f"{str(f.get('evidence','n/a'))[:120]} | {f.get('line_of_code','N/A')} |"
+            )
+    else:
+        lines.append("- No vulnerability signals recorded in this session.")
+
+    lines.extend(["", "## Evidence Artifacts"])
+    if artifacts:
+        for a in artifacts:
+            lines.append(f"- {a}")
+    else:
+        lines.append("- No artifacts recorded.")
+
+    lines.extend(["", "## RECON Context"])
+    lines.append(f"- Intake report: {result.report_path or 'N/A'}")
+    lines.append(f"- Matrix file: {result.test_matrix_path or 'N/A'}")
+    if result.downloaded_artifact_reasons:
+        lines.append("- Downloaded scope/policy artifacts:")
+        for item in result.downloaded_artifact_reasons:
+            lines.append(f"  - {item}")
+
+    out_file.write_text("\n".join(lines), encoding="utf-8")
+    return str(out_file)
 
 
 def _render_step_1(result) -> None:
@@ -728,6 +872,14 @@ def main() -> int:
 
     program_url = args.program_url
     program_hint = args.program_hint
+    session_state: dict = {
+        "program_url": program_url,
+        "recon_done": False,
+        "steps": [],
+        "tested_targets": [],
+        "artifacts": [],
+        "findings": [],
+    }
 
     # Non-interactive / direct-command modes run intake immediately.
     if args.non_interactive_output or args.run_xss_unified:
@@ -743,8 +895,11 @@ def main() -> int:
                 "[Input] Paste project handle/title from upper-left program header: "
             ).strip()
         result = run_recon(program_url, program_hint)
+        session_state["program_url"] = program_url
+        session_state["recon_done"] = True
+        session_state.setdefault("steps", []).append("RECON completed (non-interactive/direct mode).")
         if args.run_xss_unified:
-            return _run_xss_unified_scope_step(result, args.operator_id)
+            return _run_xss_unified_scope_step(result, args.operator_id, session_state=session_state)
         _render_all_steps(result)
         print(_color("[Quit] Non-interactive run complete.", RED, bold=True))
         return 0
@@ -773,6 +928,9 @@ def main() -> int:
             result = run_recon(program_url, program_hint)
             _render_recon(result)
             intake_viewed = True
+            session_state["program_url"] = program_url
+            session_state["recon_done"] = True
+            session_state.setdefault("steps", []).append(f"RECON completed for {program_url}.")
         elif choice == "2":
             if not intake_viewed:
                 print(_color("RECON is mandatory. Complete step 1 first.", RED, bold=True))
@@ -794,14 +952,16 @@ def main() -> int:
                     _render_suggested_tests_table(result)
                 elif mode_choice == "x":
                     _render_step_2(result)
-                    rc = _run_xss_unified_scope_step(result, args.operator_id)
+                    rc = _run_xss_unified_scope_step(result, args.operator_id, session_state=session_state)
                     if rc == 0:
                         tests_done = True
+                        session_state.setdefault("steps", []).append("TESTS completed: XSS unified scan executed.")
                 elif mode_choice == "a":
                     _render_step_2(result)
-                    rc = _run_afrog_safe_step(result, args.operator_id)
+                    rc = _run_afrog_safe_step(result, args.operator_id, session_state=session_state)
                     if rc == 0:
                         tests_done = True
+                        session_state.setdefault("steps", []).append("TESTS completed: Afrog baseline scan executed.")
                 elif mode_choice == "b":
                     break
                 else:
@@ -810,6 +970,10 @@ def main() -> int:
             if not intake_viewed:
                 print(_color("Run RECON first.", YELLOW, bold=True))
                 continue
+            auto_report_path = _generate_automatic_report(result, args.operator_id, session_state)
+            session_state.setdefault("artifacts", []).append(auto_report_path)
+            session_state.setdefault("steps", []).append("REPORTING invoked: automatic session report generated.")
+            print(_color(f"[Auto Report] {auto_report_path}", GREEN, bold=True))
             while True:
                 _show_reporting_menu()
                 r_choice = input(_color("Choose action (d/c/v/b): ", MAGENTA, bold=True)).strip().lower()
