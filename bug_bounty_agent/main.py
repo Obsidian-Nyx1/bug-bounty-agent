@@ -149,6 +149,7 @@ def _show_test_mode_menu() -> None:
         ["Input", "Mode"],
         [
             ["l", "List available tests"],
+            ["s", "Show suggested tests table"],
             ["x", "Run scope-aware XSS test (xss_unified.py)"],
             ["b", "Back to main menu"],
         ],
@@ -397,6 +398,24 @@ def _render_step_3(result) -> None:
     _print_table(["#", "Action"], [[str(idx), item] for idx, item in enumerate(result.suggestions, start=1)])
 
 
+def _render_suggested_tests_table(result) -> None:
+    _print_section("Suggested Tests")
+    if result.test_matrix:
+        _print_table(
+            ["ID", "Category", "Test", "Target", "Scope"],
+            [[t.test_id, t.category, t.test_name, t.target, t.scope_basis] for t in result.test_matrix[:50]],
+        )
+        _print_table(
+            ["Field", "Value"],
+            [
+                ["Total Suggested Tests", str(len(result.test_matrix))],
+                ["Matrix File", result.test_matrix_path or "Not generated"],
+            ],
+        )
+    else:
+        _print_table(["ID", "Category", "Test", "Target", "Scope"], [["-", "-", "No suggested tests generated", "-", "-"]])
+
+
 def _render_step_4(result) -> None:
     _print_section("4) Compile Report: Sources Used")
     source_rows = [[str(idx), item] for idx, item in enumerate(result.sources, start=1)]
@@ -579,7 +598,7 @@ def main() -> int:
                 continue
             while True:
                 _show_test_mode_menu()
-                mode_choice = input(_color("Choose mode (l/x/b): ", MAGENTA, bold=True)).strip().lower()
+                mode_choice = input(_color("Choose mode (l/s/x/b): ", MAGENTA, bold=True)).strip().lower()
                 if mode_choice == "l":
                     _print_section("Available Tests")
                     _print_table(
@@ -589,6 +608,8 @@ def main() -> int:
                             ["NEXT", "future tests you add later", "placeholder"],
                         ],
                     )
+                elif mode_choice == "s":
+                    _render_suggested_tests_table(result)
                 elif mode_choice == "x":
                     _render_step_2(result)
                     rc = _run_xss_unified_scope_step(result, args.operator_id)
@@ -597,7 +618,7 @@ def main() -> int:
                 elif mode_choice == "b":
                     break
                 else:
-                    print(_color("Invalid mode. Use l, x, or b.", RED, bold=True))
+                    print(_color("Invalid mode. Use l, s, x, or b.", RED, bold=True))
         elif choice == "3":
             if not intake_viewed:
                 print(_color("Run RECON first.", YELLOW, bold=True))
