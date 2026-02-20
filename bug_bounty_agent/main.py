@@ -24,6 +24,10 @@ YELLOW = "\033[38;5;220m"
 RED = "\033[38;5;196m"
 WHITE = "\033[38;5;255m"
 GRAY = "\033[38;5;245m"
+BLUE = "\033[38;5;39m"
+MAGENTA = "\033[38;5;201m"
+ORANGE = "\033[38;5;208m"
+DIM = "\033[2m"
 DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
 
 
@@ -92,9 +96,10 @@ def _terminal_width() -> int:
 
 
 def _print_section(title: str) -> None:
-    line = "-" * min(100, _terminal_width() - 2)
-    print(_color(f"\n{title}", CYAN, bold=True))
-    print(_color(line, GRAY))
+    line = "=" * min(100, _terminal_width() - 2)
+    print(_color(f"\n{line}", BLUE))
+    print(_color(f"[ {title} ]", MAGENTA, bold=True))
+    print(_color(line, BLUE))
 
 
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
@@ -114,13 +119,18 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     print(_color(border, GRAY))
     print(_color(render_row(headers), WHITE, bold=True))
     print(_color(border, GRAY))
-    for row in string_rows:
-        print(render_row(row))
+    for idx, row in enumerate(string_rows):
+        row_text = render_row(row)
+        if idx % 2 == 0:
+            print(_color(row_text, WHITE))
+        else:
+            print(_color(row_text, GRAY))
     print(_color(border, GRAY))
 
 
 def _show_workflow_menu() -> None:
     _print_section("Workflow Menu")
+    print(_color("Choose your module to continue:", ORANGE, bold=True))
     _print_table(
         ["Input", "Action"],
         [
@@ -134,6 +144,7 @@ def _show_workflow_menu() -> None:
 
 def _show_test_mode_menu() -> None:
     _print_section("TESTS Module")
+    print(_color("Select which testing operation to perform:", ORANGE, bold=True))
     _print_table(
         ["Input", "Mode"],
         [
@@ -146,6 +157,7 @@ def _show_test_mode_menu() -> None:
 
 def _show_reporting_menu() -> None:
     _print_section("REPORTING Module")
+    print(_color("Save or view report artifacts:", ORANGE, bold=True))
     _print_table(
         ["Input", "Action"],
         [
@@ -159,6 +171,7 @@ def _show_reporting_menu() -> None:
 
 def _show_start_instructions() -> None:
     _print_section("Quick Instructions")
+    print(_color("Structured flow: RECON -> TESTS -> REPORTING", GREEN, bold=True))
     _print_table(
         ["Step", "Command / Action"],
         [
@@ -479,7 +492,8 @@ def _render_all_steps(result) -> None:
 def main() -> int:
     args = parse_args()
     print(render_banner())
-    print("\n[Status] Starting ./bug_bounty\n")
+    print(_color("\n[Status] Starting ./bug_bounty", GREEN, bold=True))
+    print(_color("Interactive mode ready.", CYAN))
     _show_start_instructions()
 
     deps = ensure_runtime_dependencies(
@@ -541,7 +555,7 @@ def main() -> int:
 
     while True:
         _show_workflow_menu()
-        choice = input(_color("Select a step (1/2/3/q): ", CYAN, bold=True)).strip().lower()
+        choice = input(_color("Select a step (1/2/3/q): ", MAGENTA, bold=True)).strip().lower()
         if choice == "1":
             if not program_url and not args.no_prompt:
                 program_url = input("[Input] Paste project URL: ").strip()
@@ -565,7 +579,7 @@ def main() -> int:
                 continue
             while True:
                 _show_test_mode_menu()
-                mode_choice = input(_color("Choose mode (l/x/b): ", CYAN, bold=True)).strip().lower()
+                mode_choice = input(_color("Choose mode (l/x/b): ", MAGENTA, bold=True)).strip().lower()
                 if mode_choice == "l":
                     _print_section("Available Tests")
                     _print_table(
@@ -590,7 +604,7 @@ def main() -> int:
                 continue
             while True:
                 _show_reporting_menu()
-                r_choice = input(_color("Choose action (d/c/v/b): ", CYAN, bold=True)).strip().lower()
+                r_choice = input(_color("Choose action (d/c/v/b): ", MAGENTA, bold=True)).strip().lower()
                 if r_choice == "d":
                     out = _save_download_manifest(result, args.operator_id)
                     print(_color(f"[Saved] Download manifest: {out}", GREEN, bold=True))
