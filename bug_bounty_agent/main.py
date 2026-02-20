@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from typing import Optional
 from urllib.parse import urlparse
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
@@ -153,6 +154,7 @@ def _show_test_mode_menu() -> None:
             ["l", "List available tests"],
             ["s", "Show suggested tests table"],
             ["x", "Run scope-aware XSS test (xss_unified.py)"],
+            ["a", "Run safe in-scope Afrog baseline scan"],
             ["b", "Back to main menu"],
         ],
     )
@@ -273,6 +275,144 @@ def _normalize_xss_target(item: str) -> str | None:
     if DOMAIN_RE.match(low):
         return f"https://{low}"
     return None
+
+
+def _approved_targets_from_scope(result) -> tuple[list[str], list[str], list[str]]:
+    candidates: list[tuple[str, str]] = []
+    for item in result.scope_data.in_scope:
+        candidates.append((item, "recon_scope"))
+    for test in result.test_matrix:
+        if "verified_in_scope" not in (test.scope_basis or ""):
+            continue
+        candidates.append((test.target, f"suggested_test_{test.test_id}"))
+    if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
+        candidates.append((result.recommendation.domain, "recommendation"))
+
+    valid: list[str] = []
+    skipped: list[str] = []
+    used_sources: list[str] = []
+    for item, source in candidates:
+        normalized = _normalize_xss_target(item)
+        if not normalized:
+            skipped.append(item)
+            continue
+        if normalized not in valid:
+            valid.append(normalized)
+            used_sources.append(f"{normalized} <- {source}")
+    return valid, skipped, used_sources
+
+
+def _find_afrog_binary() -> Optional[str]:
+    found = shutil.which("afrog")
+    if found:
+        return found
+    go_bin = Path.home() / "go" / "bin" / "afrog"
+    if go_bin.exists():
+        return str(go_bin)
+    return None
+
+
+def _ensure_afrog_installed() -> Optional[str]:
+    existing = _find_afrog_binary()
+    if existing:
+        return existing
+
+    print(_color("[Info] afrog not found. Trying automatic install via Go...", YELLOW, bold=True))
+    install_cmds = [
+        ["go", "install", "github.com/zan8in/afrog/v3/cmd/afrog@latest"],
+        ["go", "install", "github.com/zan8in/afrog/cmd/afrog@latest"],
+    ]
+    for cmd in install_cmds:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception:
+            continue
+        if proc.returncode == 0:
+            installed = _find_afrog_binary()
+            if installed:
+                print(_color(f"[Info] afrog installed: {installed}", GREEN, bold=True))
+                return installed
+    return _find_afrog_binary()
+
+
+def _run_afrog_safe_step(result, operator_id: str) -> int:
+    _print_section("Afrog Instructions")
+    _print_table(
+        ["Step", "What Happens"],
+        [
+            ["1", "Checks if afrog is already installed."],
+            ["2", "If missing, tries auto-install using Go."],
+            ["3", "Builds approved in-scope target list from RECON."],
+            ["4", "Runs baseline scan: afrog -t <target>."],
+            ["5", "Saves logs under .bug_bounty_agent/reports/<operator>/afrog/."],
+        ],
+    )
+    _print_table(
+        ["Command", "Purpose"],
+        [
+            ["afrog -t https://target", "Run baseline scan for a single target"],
+            ["afrog -h", "Show afrog help/options"],
+        ],
+    )
+    proceed = input(_color("Proceed with Afrog baseline scan? (y/n): ", MAGENTA, bold=True)).strip().lower()
+    if proceed not in {"y", "yes"}:
+        print(_color("[Info] Afrog scan canceled by user.", YELLOW, bold=True))
+        return 0
+
+    afrog_bin = _ensure_afrog_installed()
+    if not afrog_bin:
+        print(_color("[Error] afrog is not installed and auto-install failed.", RED, bold=True))
+        print(_color("Install manually: go install github.com/zan8in/afrog/v3/cmd/afrog@latest", YELLOW, bold=True))
+        return 1
+
+    targets, skipped, sources = _approved_targets_from_scope(result)
+    _print_section("In-Scope Targets For Afrog")
+    if targets:
+        _print_table(["#", "Approved Target", "Scan Mode"], [[str(i), t, "afrog_baseline"] for i, t in enumerate(targets, start=1)])
+    else:
+        _print_table(["#", "Approved Target", "Scan Mode"], [["1", "None", "No in-scope URL/domain target found"]])
+    if skipped:
+        _print_table(["#", "Skipped (Non-domain/URL Scope Item)"], [[str(i), s] for i, s in enumerate(skipped[:20], start=1)])
+    if sources:
+        _print_table(["#", "Target Source"], [[str(i), s] for i, s in enumerate(sources[:30], start=1)])
+
+    if not targets:
+        print(_color("[Note] No approved targets available for afrog.", YELLOW, bold=True))
+        return 0
+
+    out_dir = Path(".bug_bounty_agent/reports") / operator_id / "afrog"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    progress = _ProgressBar()
+    failures = 0
+
+    _print_section("Running Afrog Baseline")
+    for idx, target in enumerate(targets, start=1):
+        progress.update(int((idx - 1) / max(1, len(targets)) * 100), f"afrog {idx}/{len(targets)}: {target}")
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
+        out_file = out_dir / f"{slug}_{timestamp}.txt"
+        cmd = [afrog_bin, "-t", target]
+        print(_color(f"[AFROG {idx}/{len(targets)}] trying: {' '.join(cmd)}", WHITE, bold=True))
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        output = [
+            f"$ {' '.join(cmd)}",
+            "",
+            proc.stdout or "",
+            proc.stderr or "",
+        ]
+        out_file.write_text("\n".join(output), encoding="utf-8")
+        if proc.returncode != 0:
+            failures += 1
+            print(_color(f"  -> failed (exit {proc.returncode}); log: {out_file}", RED, bold=True))
+        else:
+            print(_color(f"  -> complete; log: {out_file}", GREEN, bold=True))
+
+    progress.finish("Afrog scans complete")
+    if failures:
+        print(_color(f"[Status] Afrog finished with {failures} failure(s).", YELLOW, bold=True))
+        return 1
+    print(_color("[Status] Afrog baseline scan completed successfully.", GREEN, bold=True))
+    return 0
 
 
 def _run_xss_unified_scope_step(result, operator_id: str) -> int:
@@ -639,13 +779,14 @@ def main() -> int:
                 continue
             while True:
                 _show_test_mode_menu()
-                mode_choice = input(_color("Choose mode (l/s/x/b): ", MAGENTA, bold=True)).strip().lower()
+                mode_choice = input(_color("Choose mode (l/s/x/a/b): ", MAGENTA, bold=True)).strip().lower()
                 if mode_choice == "l":
                     _print_section("Available Tests")
                     _print_table(
                         ["ID", "Test", "Status"],
                         [
                             ["XSS-01", "scope-aware xss_unified.py", "available"],
+                            ["AFROG-01", "afrog baseline in-scope scan", "available"],
                             ["NEXT", "future tests you add later", "placeholder"],
                         ],
                     )
@@ -656,10 +797,15 @@ def main() -> int:
                     rc = _run_xss_unified_scope_step(result, args.operator_id)
                     if rc == 0:
                         tests_done = True
+                elif mode_choice == "a":
+                    _render_step_2(result)
+                    rc = _run_afrog_safe_step(result, args.operator_id)
+                    if rc == 0:
+                        tests_done = True
                 elif mode_choice == "b":
                     break
                 else:
-                    print(_color("Invalid mode. Use l, s, x, or b.", RED, bold=True))
+                    print(_color("Invalid mode. Use l, s, x, a, or b.", RED, bold=True))
         elif choice == "3":
             if not intake_viewed:
                 print(_color("Run RECON first.", YELLOW, bold=True))
