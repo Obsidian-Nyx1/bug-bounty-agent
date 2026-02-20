@@ -841,7 +841,7 @@ def main() -> int:
     _show_start_instructions()
 
     deps = ensure_runtime_dependencies(
-        include_optional=bool(args.run_xss_unified),
+        include_optional=False,
         auto_install=not args.no_auto_install_deps,
     )
     if deps.notes:
@@ -850,6 +850,20 @@ def main() -> int:
     if not deps.ok:
         print(_color("[Error] Missing required runtime dependencies. Re-run with network access or install manually.", RED, bold=True))
         return 1
+
+    # Optional dependencies (like selenium) should not block execution.
+    if args.run_xss_unified:
+        opt_deps = ensure_runtime_dependencies(
+            include_optional=True,
+            auto_install=not args.no_auto_install_deps,
+        )
+        optional_notes = [note for note in opt_deps.notes if "selenium" in note.lower()]
+        if optional_notes:
+            _print_section("Optional XSS Dependencies")
+            _print_table(
+                ["Status", "Details"],
+                [[("OK" if opt_deps.ok else "WARN"), note] for note in optional_notes],
+            )
 
     agent = BugBountyAgent()
     def run_recon(program_url: str | None, program_hint: str | None):
@@ -951,6 +965,32 @@ def main() -> int:
                 elif mode_choice == "s":
                     _render_suggested_tests_table(result)
                 elif mode_choice == "x":
+                    core_deps = ensure_runtime_dependencies(
+                        include_optional=False,
+                        auto_install=not args.no_auto_install_deps,
+                    )
+                    if core_deps.notes:
+                        _print_section("XSS Runtime Dependencies")
+                        _print_table(
+                            ["Status", "Details"],
+                            [[("OK" if core_deps.ok else "WARN"), note] for note in core_deps.notes],
+                        )
+                    if not core_deps.ok:
+                        print(_color("[Error] XSS core dependencies unavailable.", RED, bold=True))
+                        continue
+                    optional_deps = ensure_runtime_dependencies(
+                        include_optional=True,
+                        auto_install=not args.no_auto_install_deps,
+                    )
+                    optional_notes = [note for note in optional_deps.notes if "selenium" in note.lower()]
+                    if optional_notes:
+                        _print_section("Optional XSS Dependencies")
+                        _print_table(
+                            ["Status", "Details"],
+                            [[("OK" if optional_deps.ok else "WARN"), note] for note in optional_notes],
+                        )
+                    if not optional_deps.ok:
+                        print(_color("[Note] Continuing XSS scan without optional DOM browser checks if selenium is unavailable.", YELLOW, bold=True))
                     _render_step_2(result)
                     rc = _run_xss_unified_scope_step(result, args.operator_id, session_state=session_state)
                     if rc == 0:
