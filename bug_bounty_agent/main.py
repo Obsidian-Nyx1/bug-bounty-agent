@@ -529,9 +529,8 @@ def main() -> int:
         print(_color("[Quit] Non-interactive run complete.", RED, bold=True))
         return 0
 
-    intake_viewed = True
+    intake_viewed = False
     tests_done = False
-    _render_recon(result)
 
     while True:
         _show_workflow_menu()
