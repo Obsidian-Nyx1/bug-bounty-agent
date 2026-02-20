@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
@@ -29,6 +30,7 @@ MAGENTA = "\033[38;5;201m"
 ORANGE = "\033[38;5;208m"
 DIM = "\033[2m"
 DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
+URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
 
 
 def parse_args() -> argparse.Namespace:
@@ -222,38 +224,55 @@ class _ProgressBar:
 
 
 def _xss_targets_from_scope(result) -> tuple[list[str], list[str], list[str]]:
-    candidates = list(result.scope_data.in_scope)
-    candidate_sources: list[str] = []
+    candidates: list[tuple[str, str]] = []
     for item in result.scope_data.in_scope:
-        candidate_sources.append(f"{item} <- recon_scope")
+        candidates.append((item, "recon_scope"))
+    for item in getattr(result, "discovery", []).in_scope_domains if hasattr(result, "discovery") else []:
+        candidates.append((item, "recon_discovery_scope"))
+    for signal in getattr(result, "notes", []):
+        for found in URL_RE.findall(signal):
+            candidates.append((found, "recon_notes_url"))
+    for signal in getattr(result, "downloaded_artifact_reasons", []):
+        for found in URL_RE.findall(signal):
+            candidates.append((found, "download_artifact_url"))
     for test in result.test_matrix:
         if test.category.strip().lower() != "xss":
             continue
         if "verified_in_scope" not in (test.scope_basis or ""):
             continue
-        candidates.append(test.target)
-        candidate_sources.append(f"{test.target} <- suggested_test_{test.test_id}")
-    if result.recommendation and result.recommendation.domain:
-        candidates.append(result.recommendation.domain)
-        candidate_sources.append(f"{result.recommendation.domain} <- recommendation")
+        candidates.append((test.target, f"suggested_test_{test.test_id}"))
+    if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
+        candidates.append((result.recommendation.domain, "recommendation"))
 
     valid: list[str] = []
     skipped: list[str] = []
     used_sources: list[str] = []
-    for item in candidates:
-        token = item.strip().lower()
-        if token.startswith("*."):
-            token = token[2:]
-        if DOMAIN_RE.match(token):
-            if token not in valid:
-                valid.append(token)
-                for src in candidate_sources:
-                    if src.startswith(item) or src.startswith(token):
-                        used_sources.append(src)
-                        break
-        else:
+    for item, source in candidates:
+        normalized = _normalize_xss_target(item)
+        if not normalized:
             skipped.append(item)
+            continue
+        if normalized not in valid:
+            valid.append(normalized)
+            used_sources.append(f"{normalized} <- {source}")
     return valid, skipped, used_sources
+
+
+def _normalize_xss_target(item: str) -> str | None:
+    raw = (item or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("*."):
+        raw = raw[2:]
+    low = raw.lower()
+    if low.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return raw.rstrip("/")
+        return None
+    if DOMAIN_RE.match(low):
+        return f"https://{low}"
+    return None
 
 
 def _run_xss_unified_scope_step(result, operator_id: str) -> int:
@@ -267,7 +286,7 @@ def _run_xss_unified_scope_step(result, operator_id: str) -> int:
     if targets:
         _print_table(["#", "In-Scope Target", "XSS Step"], [[str(i), t, "eligible"] for i, t in enumerate(targets, start=1)])
     else:
-        _print_table(["#", "In-Scope Target", "XSS Step"], [["1", "None", "No domain-like in-scope target found"]])
+        _print_table(["#", "In-Scope Target", "XSS Step"], [["1", "None", "No in-scope URL/domain target found"]])
     if skipped:
         _print_table(["#", "Skipped (Non-domain Scope Item)"], [[str(i), s] for i, s in enumerate(skipped[:20], start=1)])
     if sources:
@@ -286,12 +305,13 @@ def _run_xss_unified_scope_step(result, operator_id: str) -> int:
     _print_section("Running Scope-Aware XSS Step")
     print(_color(f"[Status] Running xss_unified.py for {max_targets} in-scope target(s).", CYAN, bold=True))
     for idx, target in enumerate(targets[:max_targets], start=1):
-        out_file = out_dir / f"{target.replace('.', '_')}_{timestamp}.json"
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
+        out_file = out_dir / f"{slug}_{timestamp}.json"
         cmd = [
             sys.executable,
             str(script_path),
             "--target",
-            f"https://{target}",
+            target,
             "--depth",
             "1",
             "--output",
