@@ -182,6 +182,7 @@ def _show_start_instructions() -> None:
 class _ProgressBar:
     def __init__(self) -> None:
         self.current = 0
+        self._last_len = 0
 
     def update(self, pct: int, message: str) -> None:
         pct = max(self.current, max(0, min(100, pct)))
@@ -190,12 +191,14 @@ class _ProgressBar:
         filled = int((pct / 100) * width)
         bar = ("#" * filled) + ("-" * (width - filled))
         text = message[:64]
-        sys.stdout.write(
-            "\r"
-            + _color("[Loading]", CYAN, bold=True)
+        line = (
+            _color("[Loading]", CYAN, bold=True)
             + f" [{bar}] {pct:3d}% "
             + _color(text, WHITE)
         )
+        pad = " " * max(0, self._last_len - len(line))
+        sys.stdout.write("\r" + line + pad)
+        self._last_len = len(line)
         sys.stdout.flush()
 
     def finish(self, message: str = "Ready") -> None:
@@ -490,45 +493,49 @@ def main() -> int:
         print(_color("[Error] Missing required runtime dependencies. Re-run with network access or install manually.", RED, bold=True))
         return 1
 
-    program_url = args.program_url
-    if not program_url and not args.no_prompt:
-        program_url = input("[Input] Paste project URL: ").strip()
-    program_hint = args.program_hint
-    if (
-        program_url
-        and "hackerone.com/opportunities" in program_url
-        and not program_hint
-        and not args.no_prompt
-    ):
-        program_hint = input(
-            "[Input] Paste project handle/title from upper-left program header: "
-        ).strip()
-
     agent = BugBountyAgent()
-    progress = _ProgressBar()
-    progress.update(2, "Preparing intake")
-    result = agent.run(
-        AgentInput(
-            program_url=program_url or None,
-            program_hint=program_hint or None,
-            scope_file=Path(args.scope_file) if args.scope_file else None,
-            policy_file=Path(args.policy_file) if args.policy_file else None,
-            mode=args.mode,
-            operator_id=args.operator_id,
-            run_automated=(args.run_automated or "").strip().lower() == "test",
-            progress_callback=progress.update,
+    def run_recon(program_url: str | None, program_hint: str | None):
+        progress = _ProgressBar()
+        progress.update(2, "Preparing intake")
+        result_local = agent.run(
+            AgentInput(
+                program_url=program_url or None,
+                program_hint=program_hint or None,
+                scope_file=Path(args.scope_file) if args.scope_file else None,
+                policy_file=Path(args.policy_file) if args.policy_file else None,
+                mode=args.mode,
+                operator_id=args.operator_id,
+                run_automated=(args.run_automated or "").strip().lower() == "test",
+                progress_callback=progress.update,
+            )
         )
-    )
-    progress.finish("Intake finished")
+        progress.finish("Intake finished")
+        return result_local
 
-    if args.run_xss_unified:
-        return _run_xss_unified_scope_step(result, args.operator_id)
+    program_url = args.program_url
+    program_hint = args.program_hint
 
-    if args.non_interactive_output:
+    # Non-interactive / direct-command modes run intake immediately.
+    if args.non_interactive_output or args.run_xss_unified:
+        if not program_url and not args.no_prompt:
+            program_url = input("[Input] Paste project URL: ").strip()
+        if (
+            program_url
+            and "hackerone.com/opportunities" in program_url
+            and not program_hint
+            and not args.no_prompt
+        ):
+            program_hint = input(
+                "[Input] Paste project handle/title from upper-left program header: "
+            ).strip()
+        result = run_recon(program_url, program_hint)
+        if args.run_xss_unified:
+            return _run_xss_unified_scope_step(result, args.operator_id)
         _render_all_steps(result)
         print(_color("[Quit] Non-interactive run complete.", RED, bold=True))
         return 0
 
+    result = None
     intake_viewed = False
     tests_done = False
 
@@ -536,6 +543,20 @@ def main() -> int:
         _show_workflow_menu()
         choice = input(_color("Select a step (1/2/3/q): ", CYAN, bold=True)).strip().lower()
         if choice == "1":
+            if not program_url and not args.no_prompt:
+                program_url = input("[Input] Paste project URL: ").strip()
+            if not program_url:
+                print(_color("RECON needs a program URL. Provide URL and select 1 again.", RED, bold=True))
+                continue
+            if (
+                "hackerone.com/opportunities" in program_url
+                and not program_hint
+                and not args.no_prompt
+            ):
+                program_hint = input(
+                    "[Input] Paste project handle/title from upper-left program header: "
+                ).strip()
+            result = run_recon(program_url, program_hint)
             _render_recon(result)
             intake_viewed = True
         elif choice == "2":
