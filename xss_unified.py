@@ -417,6 +417,18 @@ def test_reflected_params(tester, url_params, payloads, findings):
                     print(f"  [!] Reflected: {r.get('url', 'n/a')}")
     return findings
 
+
+def test_reflected_forms(tester, forms, payloads, findings):
+    """Loop over forms, inject payloads, and collect reflected findings."""
+    print("[*] Testing reflected XSS in forms...")
+    for form in forms:
+        results = tester.test_reflected_form(form, payloads)
+        if results:
+            findings['reflected'].extend(results)
+            for r in results:
+                print(f"  [!] Reflected via form: {r['url']}")
+    return findings
+
 # ----------------------------------------------------------------------
 # XSS Tester (supports async for reflected)
 # ----------------------------------------------------------------------
@@ -498,6 +510,42 @@ class XSSTester:
                             self.detected_waf = waf
                             print(f"[!] Detected WAF: {waf} - enabling evasion.")
                     findings.append({'url': test_url, 'param': param, 'payload': payload})
+            except Exception:
+                pass
+            if self.delay > 0:
+                time.sleep(self.delay + random.uniform(0, self.jitter))
+        return findings
+
+    def test_reflected_form(self, form, payloads):
+        """Sync reflected form testing."""
+        action = urljoin(form.get('original_url', ''), form.get('action') or '')
+        method = (form.get('method') or 'get').lower()
+        findings = []
+        for payload in payloads:
+            if self.detected_waf:
+                payload = apply_evasion(payload, self.detected_waf)
+            data = {}
+            for inp in form.get('inputs', []):
+                if inp.get('type') in ['submit', 'button', 'image']:
+                    continue
+                name = inp.get('name')
+                if not name:
+                    continue
+                data[name] = payload if inp.get('type', 'text') == 'text' else inp.get('value', '')
+            if not data:
+                continue
+            try:
+                if method == 'post':
+                    resp = self.session.post(action, data=data, timeout=REQUEST_TIMEOUT)
+                else:
+                    resp = self.session.get(action, params=data, timeout=REQUEST_TIMEOUT)
+                if payload in resp.text:
+                    if self.waf_mode and not self.detected_waf:
+                        waf = detect_waf(resp.text, resp.headers)
+                        if waf:
+                            self.detected_waf = waf
+                            print(f"[!] Detected WAF: {waf} - enabling evasion.")
+                    findings.append({'url': action, 'data': data, 'payload': payload})
             except Exception:
                 pass
             if self.delay > 0:
@@ -649,6 +697,7 @@ def main():
         loop.run_until_complete(_run_reflected_async(tester, url_params, all_payloads, findings))
     else:
         test_reflected_params(tester, url_params, all_payloads, findings)
+    test_reflected_forms(tester, forms, all_payloads, findings)
 
     phase.update(f"reflected findings={len(findings['reflected'])}", 97)
 
