@@ -458,6 +458,37 @@ def test_stored_xss(tester, forms, urls, findings, delay=0):
         print("[*] No suitable forms for stored XSS injection.")
     return findings
 
+
+def test_dom_xss(tester, urls, dom_payloads, findings, limit=0):
+    """Use headless browser to test DOM XSS via parameter and fragment injections."""
+    if not tester.use_headless:
+        print("[*] DOM XSS skipped (headless browser not enabled).")
+        return findings
+
+    print("[*] Testing DOM XSS...")
+    urls_to_test = urls
+    if limit > 0 and len(urls) > limit:
+        urls_to_test = urls[:limit]
+
+    for url in urls_to_test:
+        for payload in dom_payloads:
+            parsed = urlparse(url)
+            # Inject via query parameter
+            if parsed.query:
+                test_url = url + "&xss=" + urllib.parse.quote(payload)
+            else:
+                test_url = url + "?xss=" + urllib.parse.quote(payload)
+            if tester.test_dom(test_url, payload):
+                print(f"  [!] DOM XSS (parameter) at {test_url}")
+                findings['dom'].append({'url': test_url, 'type': 'parameter', 'payload': payload})
+
+            # Inject via fragment
+            test_url = url + "#" + urllib.parse.quote(payload)
+            if tester.test_dom(test_url, payload):
+                print(f"  [!] DOM XSS (fragment) at {test_url}")
+                findings['dom'].append({'url': test_url, 'type': 'fragment', 'payload': payload})
+    return findings
+
 # ----------------------------------------------------------------------
 # XSS Tester (supports async for reflected)
 # ----------------------------------------------------------------------
@@ -478,13 +509,18 @@ class XSSTester:
         self.detected_waf = None
         self.driver = None
         if use_headless and SELENIUM_AVAILABLE:
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            if proxy:
-                chrome_options.add_argument(f'--proxy-server={proxy}')
-            self.driver = webdriver.Chrome(options=chrome_options)
+            try:
+                chrome_options = Options()
+                chrome_options.add_argument("--headless")
+                chrome_options.add_argument("--no-sandbox")
+                chrome_options.add_argument("--disable-dev-shm-usage")
+                if proxy:
+                    chrome_options.add_argument(f'--proxy-server={proxy}')
+                self.driver = webdriver.Chrome(options=chrome_options)
+            except Exception as e:
+                print(f"[!] Failed to start headless browser: {e}")
+                self.use_headless = False
+                self.driver = None
         elif use_headless and not SELENIUM_AVAILABLE:
             print("[!] Selenium not installed; DOM testing disabled.")
             self.use_headless = False
@@ -613,6 +649,26 @@ class XSSTester:
             except Exception:
                 continue
         return found
+
+    def test_dom(self, url, payload):
+        if not self.use_headless or not self.driver:
+            return False
+        try:
+            self.driver.set_page_load_timeout(10)
+            self.driver.get(url)
+            try:
+                alert = self.driver.switch_to.alert
+                alert.accept()
+                return True
+            except Exception:
+                pass
+        except TimeoutException:
+            pass
+        except UnexpectedAlertPresentException:
+            return True
+        except Exception as e:
+            print(f"DOM test error: {e}")
+        return False
 
     # Synchronous methods (reflected, stored, DOM, etc.) remain similar to previous version.
     # For brevity, I'll include them but note that they are unchanged from earlier.
@@ -761,6 +817,12 @@ def main():
         test_reflected_params(tester, url_params, all_payloads, findings)
     test_reflected_forms(tester, forms, all_payloads, findings)
     test_stored_xss(tester, forms, urls, findings, delay=args.delay)
+    dom_payloads = [
+        "<img src=x onerror=alert('XSS')>",
+        "<svg onload=alert(1)>",
+        "javascript:alert(1)",
+    ]
+    test_dom_xss(tester, list(urls), dom_payloads, findings, limit=args.dom_limit)
 
     phase.update(f"reflected findings={len(findings['reflected'])}", 97)
 
