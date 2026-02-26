@@ -385,6 +385,38 @@ def is_wordpress(base_url, session):
             pass
     return False
 
+
+async def _run_reflected_async(tester, url_params, payloads, findings):
+    """Async reflected parameter testing with aiohttp."""
+    async with aiohttp.ClientSession(headers=HEADERS) as aio_session:
+        tasks = []
+        for url, params in url_params.items():
+            for param in params:
+                tasks.append(tester.test_reflected_param_async(aio_session, url, param, payloads))
+        results = await asyncio.gather(*tasks)
+        for bucket in results:
+            if not bucket:
+                continue
+            findings["reflected"].extend(bucket)
+            for r in bucket:
+                print(f"  [!] Reflected: {r.get('url', 'n/a')}")
+
+
+def test_reflected_params(tester, url_params, payloads, findings):
+    """Loop over URL parameters, inject payloads, and collect reflected findings."""
+    print("[*] Testing reflected XSS in URL parameters...")
+    for url, params in url_params.items():
+        for param in params:
+            if hasattr(tester, "test_reflected_param_sync"):
+                results = tester.test_reflected_param_sync(url, param, payloads)
+            else:
+                results = []
+            if results:
+                findings["reflected"].extend(results)
+                for r in results:
+                    print(f"  [!] Reflected: {r.get('url', 'n/a')}")
+    return findings
+
 # ----------------------------------------------------------------------
 # XSS Tester (supports async for reflected)
 # ----------------------------------------------------------------------
@@ -444,6 +476,32 @@ class XSSTester:
                 pass
             if self.delay > 0:
                 await asyncio.sleep(self.delay + random.uniform(0, self.jitter))
+        return findings
+
+    def test_reflected_param_sync(self, url, param, payloads):
+        """Sync version for reflected param testing."""
+        parsed = urlparse(url)
+        qs = dict(urllib.parse.parse_qsl(parsed.query))
+        findings = []
+        for payload in payloads:
+            if self.detected_waf:
+                payload = apply_evasion(payload, self.detected_waf)
+            qs[param] = payload
+            new_qs = urllib.parse.urlencode(qs)
+            test_url = urllib.parse.urlunparse(parsed._replace(query=new_qs))
+            try:
+                resp = self.session.get(test_url, timeout=REQUEST_TIMEOUT)
+                if payload in resp.text:
+                    if self.waf_mode and not self.detected_waf:
+                        waf = detect_waf(resp.text, resp.headers)
+                        if waf:
+                            self.detected_waf = waf
+                            print(f"[!] Detected WAF: {waf} - enabling evasion.")
+                    findings.append({'url': test_url, 'param': param, 'payload': payload})
+            except Exception:
+                pass
+            if self.delay > 0:
+                time.sleep(self.delay + random.uniform(0, self.jitter))
         return findings
 
     # Synchronous methods (reflected, stored, DOM, etc.) remain similar to previous version.
@@ -560,6 +618,7 @@ def main():
     phase.update("crawling target surface", 60)
     crawler = Crawler(target, max_depth=args.depth, cookies=cookies,
                       delay=args.delay, jitter=args.jitter, proxy=args.proxy)
+    loop = None
     if args.async_mode:
         async def run_async_crawl():
             async with aiohttp.ClientSession(headers=HEADERS) as aio_session:
@@ -572,21 +631,33 @@ def main():
         urls, forms = crawler.crawl_sync(session)
     phase.update(f"crawl complete urls={len(urls)} forms={len(forms)}", 85)
 
-    # ... (rest of scanning logic – similar to previous but with async options for reflected)
-    # For brevity, I'll include a combined async/sync reflected test.
-    # (Full code would be too long, but the pattern is clear.)
+    url_params = {}
+    for url in urls:
+        params = extract_url_params(url)
+        if params:
+            url_params[url] = params
 
-    # At the end, generate HTML report if requested.
-    # ...
     findings = {
         "reflected": [],
         "stored": [],
         "dom": [],
         "wordpress_admin_notices": [],
     }
+
+    phase.update("running reflected xss loop", 92)
+    if args.async_mode and loop is not None:
+        loop.run_until_complete(_run_reflected_async(tester, url_params, all_payloads, findings))
+    else:
+        test_reflected_params(tester, url_params, all_payloads, findings)
+
+    phase.update(f"reflected findings={len(findings['reflected'])}", 97)
+
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(findings, f, indent=2)
+    if loop is not None:
+        loop.close()
+        asyncio.set_event_loop(None)
     phase.finish("scan flow complete")
 
 if __name__ == "__main__":
