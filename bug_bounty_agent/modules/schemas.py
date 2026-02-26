@@ -25,7 +25,8 @@ def build_session_layout(operator_id: str, program_url: str) -> SessionLayout:
     host = urlparse(program_url).hostname or "unknown-program"
     safe_host = re.sub(r"[^a-zA-Z0-9._-]+", "_", host.lower())
     session_id = f"{safe_host}_{timestamp}"
-    root = Path(".bug_bounty_agent/sessions") / operator_id / session_id
+    # Keep session artifacts in a simple top-level path for easy access.
+    root = Path("reports") / operator_id / session_id
     recon_dir = root / "recon"
     tests_dir = root / "tests"
     reports_dir = root / "reports"
@@ -47,4 +48,3 @@ def ensure_layout(layout: SessionLayout) -> None:
     layout.recon_dir.mkdir(parents=True, exist_ok=True)
     layout.tests_dir.mkdir(parents=True, exist_ok=True)
     layout.reports_dir.mkdir(parents=True, exist_ok=True)
-

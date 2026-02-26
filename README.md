@@ -23,6 +23,7 @@ Interactive bug bounty assistant focused on authorized testing workflows.
 - Runs testing:
   - scope-aware XSS (`xss_unified.py`),
   - safe in-scope afrog baseline scan.
+  - XSS saves one consolidated run report (not one file per target).
 - Runs reporting:
   - compiles session report from persisted recon/tests artifacts.
 - Saves reports and per-operator checkpoints (respawn continuity).
@@ -171,11 +172,11 @@ Features:
 ## Output
 
 - Session artifacts:
-  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/recon/project.json`
-  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/tests/index.json`
-  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/tests/xss_unified/...`
-  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/tests/afrog/...`
-  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/reports/final_*.md`
+  - `reports/<operator-id>/<session-id>/recon/project.json`
+  - `reports/<operator-id>/<session-id>/tests/index.json`
+  - `reports/<operator-id>/<session-id>/tests/xss_unified/xss_unified_<timestamp>.json`
+  - `reports/<operator-id>/<session-id>/tests/afrog/...`
+  - `reports/<operator-id>/<session-id>/reports/final_*.md`
 - Reports (legacy + additional):
   - `.bug_bounty_agent/reports/<operator-id>/...`
 - Checkpoints: `.bug_bounty_agent/checkpoints/<operator-id>/...`

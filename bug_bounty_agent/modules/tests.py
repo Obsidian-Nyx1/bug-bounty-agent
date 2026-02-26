@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
@@ -108,39 +109,94 @@ def run_xss_scope(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
-    artifacts: list[str] = []
     run_index: list[dict] = []
-    for idx, target in enumerate(targets, start=1):
-        if on_target:
-            on_target(idx, len(targets), target)
-        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
-        out_file = out_dir / f"{slug}_{timestamp}.json"
-        cmd = [
-            sys.executable,
-            str(script_path),
-            "--target",
-            target,
-            "--depth",
-            "1",
-            "--output",
-            str(out_file),
-        ]
-        proc = subprocess.run(cmd, check=False)
-        artifacts.append(str(out_file))
-        run_index.append(
-            {
-                "tool": "xss_unified",
+    combined_file = out_dir / f"xss_unified_{timestamp}.json"
+    combined: dict = {
+        "tool": "xss_unified",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_count": len(targets),
+        "summary": {
+            "failed_targets": 0,
+            "reflected": 0,
+            "stored": 0,
+            "dom": 0,
+            "wordpress_admin_notices": 0,
+        },
+        "targets": [],
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for idx, target in enumerate(targets, start=1):
+            if on_target:
+                on_target(idx, len(targets), target)
+            tmp_output = Path(tmpdir) / f"target_{idx}.json"
+            cmd = [
+                sys.executable,
+                str(script_path),
+                "--target",
+                target,
+                "--depth",
+                "1",
+                "--output",
+                str(tmp_output),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            target_data: dict = {}
+            if tmp_output.exists():
+                try:
+                    target_data = json.loads(tmp_output.read_text(encoding="utf-8"))
+                except Exception:
+                    target_data = {}
+
+            reflected = len(target_data.get("reflected", []))
+            stored = len(target_data.get("stored", []))
+            dom = len(target_data.get("dom", []))
+            wp_notice = len(target_data.get("wordpress_admin_notices", []))
+
+            combined["summary"]["reflected"] += reflected
+            combined["summary"]["stored"] += stored
+            combined["summary"]["dom"] += dom
+            combined["summary"]["wordpress_admin_notices"] += wp_notice
+
+            entry = {
                 "target": target,
-                "command": cmd,
-                "output": str(out_file),
                 "exit_code": proc.returncode,
+                "tests": {
+                    "reflected": reflected,
+                    "stored": stored,
+                    "dom": dom,
+                    "wordpress_admin_notices": wp_notice,
+                },
+                "findings": {
+                    "reflected": target_data.get("reflected", []),
+                    "stored": target_data.get("stored", []),
+                    "dom": target_data.get("dom", []),
+                    "wordpress_admin_notices": target_data.get("wordpress_admin_notices", []),
+                },
             }
-        )
-        if proc.returncode != 0:
-            failures += 1
+            if proc.returncode != 0:
+                failures += 1
+                combined["summary"]["failed_targets"] += 1
+                entry["error"] = (proc.stderr or proc.stdout or "").strip()[:500]
+            combined["targets"].append(entry)
+
+    combined_file.write_text(json.dumps(combined, indent=2), encoding="utf-8")
+    run_index.append(
+        {
+            "tool": "xss_unified",
+            "targets": len(targets),
+            "output": str(combined_file),
+            "exit_code": 1 if failures else 0,
+        }
+    )
 
     index_file = _append_test_index(layout, "xss_unified", run_index, timestamp)
-    return ToolRunResult(failures=failures, artifacts=artifacts, targets=targets, index_file=index_file)
+    return ToolRunResult(
+        failures=failures,
+        artifacts=[str(combined_file)],
+        targets=targets,
+        index_file=index_file,
+    )
 
 
 def find_afrog_binary() -> Optional[str]:
@@ -226,4 +282,3 @@ def _append_test_index(layout: SessionLayout, tool: str, entries: list[dict], ti
     payload["last_updated"] = datetime.now(timezone.utc).isoformat()
     layout.tests_index_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return str(layout.tests_index_file)
-

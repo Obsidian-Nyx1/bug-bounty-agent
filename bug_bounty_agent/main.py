@@ -218,18 +218,26 @@ class _ProgressBar:
     def __init__(self) -> None:
         self.current = 0
         self._last_len = 0
+        self._tick = 0
 
     def update(self, pct: int, message: str) -> None:
         pct = max(self.current, max(0, min(100, pct)))
         self.current = pct
-        width = 34
+        width = 40
         filled = int((pct / 100) * width)
-        bar = ("#" * filled) + ("-" * (width - filled))
+        head = ">" if filled < width else "="
+        body = ("=" * max(0, filled - 1)) + (head if filled > 0 else "")
+        trail = "." * (width - len(body))
+        bar = body + trail
+        spinner = ["|", "/", "-", "\\"][self._tick % 4]
+        self._tick += 1
         text = message[:64]
         line = (
-            _color("[Loading]", CYAN, bold=True)
-            + f" [{bar}] {pct:3d}% "
-            + _color(text, WHITE)
+            _color(f"[{spinner}]", ORANGE, bold=True)
+            + " "
+            + _color("Loading", CYAN, bold=True)
+            + f" <{bar}> {pct:3d}% "
+            + _color(text, WHITE, bold=True)
         )
         pad = " " * max(0, self._last_len - len(line))
         sys.stdout.write("\r" + line + pad)
@@ -300,8 +308,7 @@ def _run_afrog_safe_step(
     _print_section("Running Afrog Baseline")
 
     def _on_target(idx: int, total: int, target: str) -> None:
-        progress.update(int((idx - 1) / max(1, total) * 100), f"afrog {idx}/{total}: {target}")
-        print(_color(f"[AFROG {idx}/{total}] trying: {afrog_bin} -t {target}", WHITE, bold=True))
+        progress.update(int((idx - 1) / max(1, total) * 100), f"afrog scan {idx}/{total}: {target}")
 
     tool_run = run_afrog_scope(result, session_layout, afrog_bin, on_target=_on_target)
     progress.finish("Afrog scans complete")
@@ -315,7 +322,8 @@ def _run_afrog_safe_step(
             session_state.setdefault("artifacts", []).append(str(out_file))
             target_guess = out_file.stem.split("_")[0]
             session_state.setdefault("findings", []).extend(_extract_afrog_findings(out_file, target_guess))
-        print(_color(f"  -> log: {artifact}", GREEN, bold=True))
+    if tool_run.artifacts:
+        print(_color(f"[Report] {tool_run.artifacts[0]}", GREEN, bold=True))
     if tool_run.index_file:
         print(_color(f"[Index] {tool_run.index_file}", CYAN, bold=True))
 
@@ -359,11 +367,13 @@ def _run_xss_unified_scope_step(
     max_targets = len(targets)
     _print_section("Running Scope-Aware XSS Step")
     print(_color(f"[Status] Running xss_unified.py for {max_targets} in-scope target(s).", CYAN, bold=True))
+    progress = _ProgressBar()
 
     def _on_target(idx: int, total: int, target: str) -> None:
-        print(_color(f"[XSS {idx}/{total}] {target}", WHITE, bold=True))
+        progress.update(int((idx - 1) / max(1, total) * 100), f"xss scan {idx}/{total}: {target}")
 
     tool_run = run_xss_scope(result, session_layout, script_path, on_target=_on_target)
+    progress.finish("XSS scan complete")
     for target in tool_run.targets:
         if session_state is not None:
             session_state.setdefault("tested_targets", []).append({"tool": "xss_unified", "target": target})
@@ -373,7 +383,8 @@ def _run_xss_unified_scope_step(
         if session_state is not None:
             session_state.setdefault("artifacts", []).append(str(out_file))
             session_state.setdefault("findings", []).extend(_extract_xss_findings(out_file, target_guess))
-        print(_color(f"  -> report: {artifact}", GREEN, bold=True))
+    if tool_run.artifacts:
+        print(_color(f"[Report] {tool_run.artifacts[0]}", GREEN, bold=True))
     if tool_run.index_file:
         print(_color(f"[Index] {tool_run.index_file}", CYAN, bold=True))
 
@@ -399,6 +410,37 @@ def _extract_xss_findings(report_file: Path, target: str) -> list[dict]:
         "dom": "high",
         "wordpress_admin_notices": "medium",
     }
+
+    # New consolidated format: one file containing per-target results.
+    if isinstance(data.get("targets"), list):
+        for target_entry in data.get("targets", [])[:500]:
+            target_name = str(target_entry.get("target") or target)
+            findings_obj = target_entry.get("findings", {})
+            if not isinstance(findings_obj, dict):
+                continue
+            for key, severity in mapping.items():
+                values = findings_obj.get(key, [])
+                if not values:
+                    continue
+                for item in values[:20]:
+                    if isinstance(item, dict):
+                        evidence = item.get("url") or item.get("found_at") or str(item)
+                    else:
+                        evidence = str(item)
+                    findings.append(
+                        {
+                            "tool": "xss_unified",
+                            "target": target_name,
+                            "category": key,
+                            "severity": severity,
+                            "evidence": evidence,
+                            "line_of_code": "N/A (black-box web test evidence)",
+                            "artifact": str(report_file),
+                        }
+                    )
+        return findings
+
+    # Backward-compatible per-target report format.
     for key, severity in mapping.items():
         values = data.get(key, [])
         if not values:
