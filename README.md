@@ -4,21 +4,27 @@ Interactive bug bounty assistant focused on authorized testing workflows.
 
 ## What It Does
 
-- Shows startup instructions + interactive workflow menu (`1/2/3/4/a/q`).
-- Runs Step 1 intake:
+- Shows startup instructions + MSF-style console prompt (`bug_bounty>>`).
+- Supports module-first workflow:
+  - `RECON`
+  - `TESTS`
+  - `REPORTING`
+- Runs RECON intake:
   - gathers policy/scope/docs candidates,
   - downloads HackerOne scope artifacts when available (`CSV` + Burp JSON),
   - extracts in-scope/out-of-scope signals,
   - finds prior bug/write-up links and social discussions.
-- Runs Step 2 recommendation:
+- Runs target recommendation:
   - suggests next target,
   - explains allowed vs blocked actions.
-- Runs Step 3 analysis:
-  - builds a 50-test matrix,
+- Runs analysis:
+  - builds a 100-test matrix,
   - prints scope label meanings in terminal for clarity.
-- Runs Step 4 compile-report view:
-  - sources, notes, report paths, automated artifacts.
-- Optional automated checks (`--run-automated test`) and optional scope-aware XSS step (`--xss_unified.py`).
+- Runs testing:
+  - scope-aware XSS (`xss_unified.py`),
+  - safe in-scope afrog baseline scan.
+- Runs reporting:
+  - compiles session report from persisted recon/tests artifacts.
 - Saves reports and per-operator checkpoints (respawn continuity).
 
 ## Safety Model
@@ -35,40 +41,74 @@ chmod +x ./bug_bounty
 ./bug_bounty
 ```
 
-On startup, the agent now checks required Python dependencies and auto-installs missing ones for the current interpreter.
-
-Non-interactive:
+When the console starts, use:
 
 ```bash
-./bug_bounty --program-url https://hackerone.com/<program> --operator-id <name>
+show options
+recon
+tests
+report
+quit
 ```
 
-With scope/policy files:
+Inside TESTS console (`bug_bounty/tests>>`):
 
 ```bash
-./bug_bounty \
-  --program-url https://hackerone.com/<program> \
-  --scope-file scope.txt \
-  --policy-file policy.txt \
-  --operator-id <name>
+show options
+list
+suggested
+xss
+afrog
+back
 ```
 
-Run all output sections without the interactive menu:
+Inside REPORTING console (`bug_bounty/report>>`):
 
 ```bash
-./bug_bounty --program-url https://hackerone.com/<program> --non-interactive-output
+show options
+download
+custom
+view
+back
 ```
 
-Run built-in automated checks:
+## CLI UX (Subcommands)
+
+Run RECON:
 
 ```bash
-./bug_bounty --program-url https://hackerone.com/<program> --run-automated test
+./bug_bounty recon --program-url https://hackerone.com/<program>
 ```
 
-Run scope-aware unified XSS flow:
+Run TESTS (XSS):
+
+```bash
+./bug_bounty test --tool xss --program-url https://hackerone.com/<program>
+```
+
+Run TESTS (afrog):
+
+```bash
+./bug_bounty test --tool afrog --program-url https://hackerone.com/<program>
+```
+
+Run REPORTING:
+
+```bash
+./bug_bounty report --program-url https://hackerone.com/<program>
+```
+
+Run all modules:
+
+```bash
+./bug_bounty run-all --program-url https://hackerone.com/<program>
+```
+
+Legacy flags are still supported:
 
 ```bash
 ./bug_bounty --program-url https://hackerone.com/<program> --xss_unified.py
+./bug_bounty --program-url https://hackerone.com/<program> --run-automated test
 ```
 
 Disable dependency auto-install:
@@ -130,7 +170,14 @@ Features:
 
 ## Output
 
-- Reports: `.bug_bounty_agent/reports/<operator-id>/...`
+- Session artifacts:
+  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/recon/project.json`
+  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/tests/index.json`
+  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/tests/xss_unified/...`
+  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/tests/afrog/...`
+  - `.bug_bounty_agent/sessions/<operator-id>/<session-id>/reports/final_*.md`
+- Reports (legacy + additional):
+  - `.bug_bounty_agent/reports/<operator-id>/...`
 - Checkpoints: `.bug_bounty_agent/checkpoints/<operator-id>/...`
 - Learning memory: `.bug_bounty_agent/learning_memory.jsonl`
 - Downloads: `.bug_bounty_agent/downloads/<program>/...`
