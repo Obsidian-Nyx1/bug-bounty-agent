@@ -9,8 +9,9 @@ ________________________________________________________________________________
   | |_| | |_| | |\  | | | / ___ \ ___) | |___ 
    \__\_\\___/|_| \_| |_|/_/   \_\____/ \____|
 ________________________________________________________________________________
-               ULTIMATE AGGRESSIVE XSS SCANNER v3.0
+               ULTIMATE AGGRESSIVE XSS SCANNER v3.1
          Advanced WAF evasion · Context‑aware polyglots · ML scoring
+                           Proxy rotation · Async forms
 ________________________________________________________________________________
 """
 
@@ -60,6 +61,24 @@ DEFAULT_DOM_LIMIT = 50
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADERS = {'User-Agent': USER_AGENT}
 REQUEST_TIMEOUT = 10
+
+class ProxyRotator:
+    """Round-robin/random proxy selector."""
+    def __init__(self, proxy_list=None):
+        self.proxies = [p for p in (proxy_list or []) if p]
+        self.current = 0
+
+    def get_proxy(self):
+        if not self.proxies:
+            return None
+        proxy = self.proxies[self.current]
+        self.current = (self.current + 1) % len(self.proxies)
+        return proxy
+
+    def random_proxy(self):
+        if not self.proxies:
+            return None
+        return random.choice(self.proxies)
 
 class ScopeManager:
     """Centralized scope evaluation for URLs."""
@@ -387,7 +406,7 @@ class PayloadScorer:
 # 8. CRAWLER (SYNC/ASYNC)
 # ----------------------------------------------------------------------
 class Crawler:
-    def __init__(self, start_url, max_depth, cookies=None, path_filter=None, delay=0, jitter=0, proxy=None, scope_checker=None):
+    def __init__(self, start_url, max_depth, cookies=None, path_filter=None, delay=0, jitter=0, proxy=None, scope_checker=None, proxy_rotator=None):
         self.start_url = start_url
         self.base_domain = urlparse(start_url).netloc
         self.max_depth = max_depth
@@ -397,13 +416,15 @@ class Crawler:
         self.delay = delay
         self.jitter = jitter
         self.proxy = proxy
+        self.proxy_rotator = proxy_rotator
         self.visited = set()
         self.urls_to_visit = deque()
         self.urls_to_visit.append((start_url, 0))
 
     async def fetch_async(self, session, url):
+        req_proxy = self.proxy_rotator.random_proxy() if self.proxy_rotator else self.proxy
         try:
-            async with session.get(url, timeout=REQUEST_TIMEOUT, proxy=self.proxy) as resp:
+            async with session.get(url, timeout=REQUEST_TIMEOUT, proxy=req_proxy) as resp:
                 if resp.status == 200:
                     return await resp.text()
         except:
@@ -413,8 +434,9 @@ class Crawler:
     def fetch_sync(self, session, url):
         try:
             kwargs = {'timeout': REQUEST_TIMEOUT}
-            if self.proxy:
-                kwargs['proxies'] = {'http': self.proxy, 'https': self.proxy}
+            req_proxy = self.proxy_rotator.random_proxy() if self.proxy_rotator else self.proxy
+            if req_proxy:
+                kwargs['proxies'] = {'http': req_proxy, 'https': req_proxy}
             resp = session.get(url, **kwargs)
             if resp.status_code == 200:
                 return resp.text
@@ -656,6 +678,7 @@ class XSSTester:
         self.jitter = jitter
         self.max_workers = max_workers
         self.proxy = proxy
+        self.proxy_rotator = None
         self.waf_name = waf_name
         self.encoder = get_encoder_for_waf(waf_name) if waf_name else (lambda p: p)
         self.mutation_engine = MutationEngine()
@@ -674,6 +697,20 @@ class XSSTester:
         elif use_headless and not SELENIUM_AVAILABLE:
             print("[!] Selenium not installed; DOM testing disabled.")
             self.use_headless = False
+
+    def set_proxy_rotator(self, proxy_rotator):
+        self.proxy_rotator = proxy_rotator
+
+    def _pick_proxy(self):
+        if self.proxy_rotator:
+            return self.proxy_rotator.random_proxy()
+        return self.proxy
+
+    def _sync_request(self, method, url, **kwargs):
+        req_proxy = self._pick_proxy()
+        if req_proxy:
+            kwargs['proxies'] = {'http': req_proxy, 'https': req_proxy}
+        return self.session.request(method, url, **kwargs)
 
     def _apply_time_evasion(self, payload):
         """
@@ -713,7 +750,7 @@ class XSSTester:
             new_qs = urlencode(qs)
             test_url = urlunparse(parsed._replace(query=new_qs))
             try:
-                resp = self.session.get(test_url, timeout=REQUEST_TIMEOUT)
+                resp = self._sync_request('GET', test_url, timeout=REQUEST_TIMEOUT)
                 # Check reflection
                 if encoded_payload in resp.text:
                     # Detect context for future polyglots
@@ -733,7 +770,7 @@ class XSSTester:
                         poly_qs = urlencode(qs)
                         poly_url = urlunparse(parsed._replace(query=poly_qs))
                         try:
-                            poly_resp = self.session.get(poly_url, timeout=REQUEST_TIMEOUT)
+                            poly_resp = self._sync_request('GET', poly_url, timeout=REQUEST_TIMEOUT)
                             if polyglot in poly_resp.text:
                                 findings.append({
                                     'url': poly_url,
@@ -776,7 +813,7 @@ class XSSTester:
                 new_qs = urlencode(qs)
                 test_url = urlunparse(parsed._replace(query=new_qs))
                 try:
-                    async with aio_session.get(test_url, timeout=REQUEST_TIMEOUT, proxy=self.proxy) as resp:
+                    async with aio_session.get(test_url, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as resp:
                         body = await resp.text()
                     if encoded_payload in body:
                         contexts = detect_context(body, encoded_payload)
@@ -794,12 +831,74 @@ class XSSTester:
                             poly_qs = urlencode(qs)
                             poly_url = urlunparse(parsed._replace(query=poly_qs))
                             try:
-                                async with aio_session.get(poly_url, timeout=REQUEST_TIMEOUT, proxy=self.proxy) as poly_resp:
+                                async with aio_session.get(poly_url, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as poly_resp:
                                     poly_body = await poly_resp.text()
                                 if polyglot in poly_body:
                                     findings.append({
                                         'url': poly_url,
                                         'param': param,
+                                        'payload': polyglot,
+                                        'contexts': [ctx],
+                                        'strategy': 'context_polyglot'
+                                    })
+                            except Exception:
+                                pass
+                        if self.ml_enabled and self.scorer:
+                            self.scorer.record_success(payload)
+                    else:
+                        if self.ml_enabled and self.scorer:
+                            self.scorer.record_failure(payload)
+                except Exception:
+                    pass
+                if self.delay > 0:
+                    await asyncio.sleep(self.delay + random.uniform(0, self.jitter))
+        return findings
+
+    async def test_reflected_form_async(self, aio_session, form, base_payloads, semaphore):
+        """Async parity version of reflected form testing."""
+        action = urljoin(form['original_url'], form['action'])
+        method = form['method']
+        findings = []
+        if self.ml_enabled and self.scorer:
+            payloads = self.scorer.get_weighted_payloads(base_payloads, top_k=50)
+        else:
+            payloads = base_payloads
+        async with semaphore:
+            for payload in payloads:
+                encoded_payload = self._prepare_payload(payload)
+                data = {}
+                for inp in form['inputs']:
+                    if inp['type'] not in ['submit', 'button', 'image']:
+                        data[inp['name']] = encoded_payload if inp['type'] == 'text' else inp.get('value', '')
+                try:
+                    if method == 'post':
+                        async with aio_session.post(action, data=data, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as resp:
+                            body = await resp.text()
+                    else:
+                        async with aio_session.get(action, params=data, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as resp:
+                            body = await resp.text()
+                    if encoded_payload in body:
+                        findings.append({'url': action, 'data': data, 'payload': encoded_payload})
+                        contexts = detect_context(body, encoded_payload)
+                        for ctx in contexts:
+                            polyglot = self._prepare_payload(generate_polyglot_for_context(ctx))
+                            if polyglot == encoded_payload:
+                                continue
+                            poly_data = {}
+                            for inp in form['inputs']:
+                                if inp['type'] not in ['submit', 'button', 'image']:
+                                    poly_data[inp['name']] = polyglot if inp['type'] == 'text' else inp.get('value', '')
+                            try:
+                                if method == 'post':
+                                    async with aio_session.post(action, data=poly_data, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as poly_resp:
+                                        poly_body = await poly_resp.text()
+                                else:
+                                    async with aio_session.get(action, params=poly_data, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as poly_resp:
+                                        poly_body = await poly_resp.text()
+                                if polyglot in poly_body:
+                                    findings.append({
+                                        'url': action,
+                                        'data': poly_data,
                                         'payload': polyglot,
                                         'contexts': [ctx],
                                         'strategy': 'context_polyglot'
@@ -833,9 +932,9 @@ class XSSTester:
                     data[inp['name']] = encoded_payload if inp['type']=='text' else inp.get('value','')
             try:
                 if method == 'post':
-                    resp = self.session.post(action, data=data, timeout=REQUEST_TIMEOUT)
+                    resp = self._sync_request('POST', action, data=data, timeout=REQUEST_TIMEOUT)
                 else:
-                    resp = self.session.get(action, params=data, timeout=REQUEST_TIMEOUT)
+                    resp = self._sync_request('GET', action, params=data, timeout=REQUEST_TIMEOUT)
                 if encoded_payload in resp.text:
                     findings.append({'url': action, 'data': data, 'payload': encoded_payload})
                     # Context-aware polyglot probing for form reflections
@@ -850,9 +949,9 @@ class XSSTester:
                                 poly_data[inp['name']] = polyglot if inp['type'] == 'text' else inp.get('value', '')
                         try:
                             if method == 'post':
-                                poly_resp = self.session.post(action, data=poly_data, timeout=REQUEST_TIMEOUT)
+                                poly_resp = self._sync_request('POST', action, data=poly_data, timeout=REQUEST_TIMEOUT)
                             else:
-                                poly_resp = self.session.get(action, params=poly_data, timeout=REQUEST_TIMEOUT)
+                                poly_resp = self._sync_request('GET', action, params=poly_data, timeout=REQUEST_TIMEOUT)
                             if polyglot in poly_resp.text:
                                 findings.append({
                                     'url': action,
@@ -888,9 +987,9 @@ class XSSTester:
                 data[inp['name']] = inp.get('value', '')
         try:
             if method == 'post':
-                self.session.post(action, data=data, timeout=REQUEST_TIMEOUT)
+                self._sync_request('POST', action, data=data, timeout=REQUEST_TIMEOUT)
             else:
-                self.session.get(action, params=data, timeout=REQUEST_TIMEOUT)
+                self._sync_request('GET', action, params=data, timeout=REQUEST_TIMEOUT)
             return True
         except Exception:
             return False
@@ -899,7 +998,7 @@ class XSSTester:
         found = []
         for url in urls:
             try:
-                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+                resp = self._sync_request('GET', url, timeout=REQUEST_TIMEOUT)
                 if payload in resp.text:
                     found.append(url)
             except Exception:
@@ -949,7 +1048,7 @@ class XSSTester:
                     new_qs = urlencode(qs)
                     test_url = urlunparse(parsed._replace(query=new_qs))
                     try:
-                        self.session.get(test_url, timeout=REQUEST_TIMEOUT)
+                        self._sync_request('GET', test_url, timeout=REQUEST_TIMEOUT)
                     except:
                         pass
                     if self.delay > 0:
@@ -960,7 +1059,7 @@ class XSSTester:
         dangerous_tags = ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'onerror', 'onload', 'onmouseover', 'onclick']
         for url in admin_urls:
             try:
-                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+                resp = self._sync_request('GET', url, timeout=REQUEST_TIMEOUT)
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 notices = soup.find_all('div', class_=re.compile(r'notice'))
                 for notice in notices:
@@ -1119,11 +1218,14 @@ ________________________________________________________________________________
   | |_| | |_| | |\  | | | / ___ \ ___) | |___ 
    \__\_\\___/|_| \_| |_|/_/   \_\____/ \____|
 ________________________________________________________________________________
-               ULTIMATE AGGRESSIVE XSS SCANNER v3.0
+               ULTIMATE AGGRESSIVE XSS SCANNER v3.1
          Advanced WAF evasion · Context‑aware polyglots · ML scoring
+                           Proxy rotation · Async forms
 ________________________________________________________________________________
 """
     print(banner)
+    print("[!] WARNING: Run this scanner only on assets you own or are explicitly authorized to test.")
+    print("[!] Unauthorized scanning may violate law and program policy.\n")
 
     parser = argparse.ArgumentParser(description="ULTIMATE Aggressive XSS Scanner")
     parser.add_argument("target", nargs="?", help="Target URL")
@@ -1141,7 +1243,8 @@ ________________________________________________________________________________
     parser.add_argument("--gen-payloads", type=int, metavar="COUNT", help="Generate COUNT payloads and save to file")
     parser.add_argument("--output", help="Save report to file (JSON)")
     parser.add_argument("--html-report", help="Save HTML report to file")
-    parser.add_argument("--proxy", help="Proxy URL (e.g., http://127.0.0.1:8080)")
+    parser.add_argument("--proxy", help="Single proxy URL (e.g., http://127.0.0.1:8080)")
+    parser.add_argument("--proxy-file", help="File with proxy list (one per line) for rotation")
     parser.add_argument("--async-mode", action="store_true", help="Use asyncio for high concurrency")
     parser.add_argument("--ml", action="store_true", help="Enable machine learning payload selection")
     parser.add_argument("--no-waf", action="store_true", help="Skip WAF fingerprinting check")
@@ -1199,11 +1302,24 @@ ________________________________________________________________________________
                 name, value = part.strip().split('=', 1)
                 cookies[name] = value
 
+    # Load proxies for rotation
+    proxy_list = []
+    if args.proxy_file:
+        if os.path.exists(args.proxy_file):
+            with open(args.proxy_file, 'r', encoding='utf-8', errors='ignore') as pf:
+                proxy_list = [line.strip() for line in pf if line.strip()]
+            print(f"[*] Loaded {len(proxy_list)} proxies for rotation.")
+        else:
+            print(f"[!] Proxy file not found: {args.proxy_file}")
+    elif args.proxy:
+        proxy_list = [args.proxy]
+    proxy_rotator = ProxyRotator(proxy_list) if proxy_list else None
+
     # Create session for initial tasks
     session = requests.Session()
     session.headers.update(HEADERS)
     session.cookies.update(cookies)
-    if args.proxy:
+    if args.proxy and not proxy_rotator:
         session.proxies.update({'http': args.proxy, 'https': args.proxy})
 
     run_waf = not args.no_waf
@@ -1265,11 +1381,12 @@ ________________________________________________________________________________
         external_payloads=external_payloads,
         ml_enabled=args.ml
     )
+    tester.set_proxy_rotator(proxy_rotator)
 
     # 6. Crawl
     crawler = Crawler(target, max_depth=args.depth, cookies=cookies,
                       delay=args.delay, jitter=args.jitter, proxy=args.proxy,
-                      scope_checker=scope.is_in_scope)
+                      scope_checker=scope.is_in_scope, proxy_rotator=proxy_rotator)
     if args.async_mode:
         async def run_async_crawl():
             async with aiohttp.ClientSession(headers=HEADERS) as aio_session:
@@ -1306,10 +1423,12 @@ ________________________________________________________________________________
         'wordpress_admin_notices': []
     }
 
-    # --- Reflected URL/param testing ---
+    # --- Reflected URL/param + form testing ---
     if run_reflected:
         print("\n[*] Testing reflected XSS in URL parameters...")
-    if run_reflected and args.async_mode:
+    if run_forms:
+        print("\n[*] Testing reflected XSS in forms...")
+    if (run_reflected or run_forms) and args.async_mode:
         async def run_reflected_async():
             connector = aiohttp.TCPConnector(limit=max(1, args.workers))
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT + 5)
@@ -1328,6 +1447,13 @@ ________________________________________________________________________________
                         tasks.append(
                             tester.test_reflected_param_async(
                                 aio_session, url, param, base_payloads, sem
+                            )
+                        )
+                if run_forms:
+                    for form in forms:
+                        tasks.append(
+                            tester.test_reflected_form_async(
+                                aio_session, form, base_payloads, sem
                             )
                         )
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1354,19 +1480,18 @@ ________________________________________________________________________________
                     findings['reflected'].extend(res)
                     for r in res:
                         print(f"  [!] Reflected: {r['url']}")
-    else:
+    elif not run_reflected:
         print("\n[*] Skipping reflected URL/param scan.")
 
-    # --- Reflected form testing ---
-    if run_forms:
-        print("\n[*] Testing reflected XSS in forms...")
+    # --- Reflected form testing (sync path only) ---
+    if run_forms and not args.async_mode:
         for form in forms:
             res = tester.test_reflected_form(form, base_payloads)
             if res:
                 findings['reflected'].extend(res)
                 for r in res:
                     print(f"  [!] Reflected via form: {r['url']}")
-    else:
+    elif not run_forms:
         print("\n[*] Skipping reflected form scan.")
 
     # --- Stored XSS testing ---
@@ -1459,7 +1584,7 @@ ________________________________________________________________________________
         admin_crawler = Crawler(target, max_depth=1, cookies=cookies,
                                 path_filter=lambda u: '/wp-admin/' in u,
                                 delay=args.delay, jitter=args.jitter, proxy=args.proxy,
-                                scope_checker=scope.is_in_scope)
+                                scope_checker=scope.is_in_scope, proxy_rotator=proxy_rotator)
         admin_urls, _ = admin_crawler.crawl_sync(session)
         if admin_urls:
             print(f"[*] Found {len(admin_urls)} admin URLs.")
