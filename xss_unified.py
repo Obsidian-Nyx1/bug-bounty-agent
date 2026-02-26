@@ -486,14 +486,21 @@ def main():
 
     phase = LiveBar("Phase")
 
+    generated_payloads = None
+
     # Handle payload generation request
     if args.gen_payloads:
         phase.update("generating payload set")
-        payloads = PayloadGenerator.generate(args.gen_payloads)
+        generated_payloads = PayloadGenerator.generate(args.gen_payloads)
         outfile = args.payload_file if args.payload_file else "xss_payloads.txt"
-        with open(outfile, 'w') as f:
-            for p in payloads:
+        with open(outfile, 'w', encoding='utf-8') as f:
+            for p in generated_payloads:
                 f.write(p + '\n')
+        # Force scanner to use the generated file/path in this same run.
+        args.payload_file = outfile
+        # If user did not explicitly set payload limit, use all generated payloads.
+        if args.payload_limit == DEFAULT_PAYLOAD_LIMIT:
+            args.payload_limit = 0
         phase.update(f"payload file saved: {outfile}", 20)
         if not args.target:   # if only generating, exit
             phase.finish("payload generation complete")
@@ -516,7 +523,10 @@ def main():
 
     # Load payloads
     phase.update("loading payloads", 30)
-    if args.payload_file and os.path.exists(args.payload_file):
+    if generated_payloads is not None:
+        all_payloads = generated_payloads
+        phase.update(f"using generated payloads: {len(all_payloads)}", 35)
+    elif args.payload_file and os.path.exists(args.payload_file):
         with open(args.payload_file, 'r') as f:
             all_payloads = [line.strip() for line in f if line.strip()]
     else:
