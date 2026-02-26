@@ -7,17 +7,24 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urlparse
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
 from bug_bounty_agent.bootstrap import ensure_runtime_dependencies
+from bug_bounty_agent.modules.schemas import SessionLayout, build_session_layout
+from bug_bounty_agent.modules.recon import persist_recon_profile
+from bug_bounty_agent.modules.tests import (
+    collect_approved_targets,
+    collect_xss_targets,
+    ensure_afrog_installed,
+    run_afrog_scope,
+    run_xss_scope,
+)
+from bug_bounty_agent.modules.reporting import compile_session_report
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -31,9 +38,6 @@ BLUE = "\033[38;5;39m"
 MAGENTA = "\033[38;5;201m"
 ORANGE = "\033[38;5;208m"
 DIM = "\033[2m"
-DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
-URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -226,117 +230,12 @@ class _ProgressBar:
         sys.stdout.flush()
 
 
-def _xss_targets_from_scope(result) -> tuple[list[str], list[str], list[str]]:
-    candidates: list[tuple[str, str]] = []
-    for item in result.scope_data.in_scope:
-        candidates.append((item, "recon_scope"))
-    for item in getattr(result, "discovery", []).in_scope_domains if hasattr(result, "discovery") else []:
-        candidates.append((item, "recon_discovery_scope"))
-    for signal in getattr(result, "notes", []):
-        for found in URL_RE.findall(signal):
-            candidates.append((found, "recon_notes_url"))
-    for signal in getattr(result, "downloaded_artifact_reasons", []):
-        for found in URL_RE.findall(signal):
-            candidates.append((found, "download_artifact_url"))
-    for test in result.test_matrix:
-        if test.category.strip().lower() != "xss":
-            continue
-        if "verified_in_scope" not in (test.scope_basis or ""):
-            continue
-        candidates.append((test.target, f"suggested_test_{test.test_id}"))
-    if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
-        candidates.append((result.recommendation.domain, "recommendation"))
-
-    valid: list[str] = []
-    skipped: list[str] = []
-    used_sources: list[str] = []
-    for item, source in candidates:
-        normalized = _normalize_xss_target(item)
-        if not normalized:
-            skipped.append(item)
-            continue
-        if normalized not in valid:
-            valid.append(normalized)
-            used_sources.append(f"{normalized} <- {source}")
-    return valid, skipped, used_sources
-
-
-def _normalize_xss_target(item: str) -> str | None:
-    raw = (item or "").strip()
-    if not raw:
-        return None
-    if raw.startswith("*."):
-        raw = raw[2:]
-    low = raw.lower()
-    if low.startswith(("http://", "https://")):
-        parsed = urlparse(raw)
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
-            return raw.rstrip("/")
-        return None
-    if DOMAIN_RE.match(low):
-        return f"https://{low}"
-    return None
-
-
-def _approved_targets_from_scope(result) -> tuple[list[str], list[str], list[str]]:
-    candidates: list[tuple[str, str]] = []
-    for item in result.scope_data.in_scope:
-        candidates.append((item, "recon_scope"))
-    for test in result.test_matrix:
-        if "verified_in_scope" not in (test.scope_basis or ""):
-            continue
-        candidates.append((test.target, f"suggested_test_{test.test_id}"))
-    if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
-        candidates.append((result.recommendation.domain, "recommendation"))
-
-    valid: list[str] = []
-    skipped: list[str] = []
-    used_sources: list[str] = []
-    for item, source in candidates:
-        normalized = _normalize_xss_target(item)
-        if not normalized:
-            skipped.append(item)
-            continue
-        if normalized not in valid:
-            valid.append(normalized)
-            used_sources.append(f"{normalized} <- {source}")
-    return valid, skipped, used_sources
-
-
-def _find_afrog_binary() -> Optional[str]:
-    found = shutil.which("afrog")
-    if found:
-        return found
-    go_bin = Path.home() / "go" / "bin" / "afrog"
-    if go_bin.exists():
-        return str(go_bin)
-    return None
-
-
-def _ensure_afrog_installed() -> Optional[str]:
-    existing = _find_afrog_binary()
-    if existing:
-        return existing
-
-    print(_color("[Info] afrog not found. Trying automatic install via Go...", YELLOW, bold=True))
-    install_cmds = [
-        ["go", "install", "github.com/zan8in/afrog/v3/cmd/afrog@latest"],
-        ["go", "install", "github.com/zan8in/afrog/cmd/afrog@latest"],
-    ]
-    for cmd in install_cmds:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        except Exception:
-            continue
-        if proc.returncode == 0:
-            installed = _find_afrog_binary()
-            if installed:
-                print(_color(f"[Info] afrog installed: {installed}", GREEN, bold=True))
-                return installed
-    return _find_afrog_binary()
-
-
-def _run_afrog_safe_step(result, operator_id: str, session_state: Optional[dict] = None) -> int:
+def _run_afrog_safe_step(
+    result,
+    operator_id: str,
+    session_layout: SessionLayout | None,
+    session_state: Optional[dict] = None,
+) -> int:
     _print_section("Afrog Instructions")
     _print_table(
         ["Step", "What Happens"],
@@ -360,13 +259,13 @@ def _run_afrog_safe_step(result, operator_id: str, session_state: Optional[dict]
         print(_color("[Info] Afrog scan canceled by user.", YELLOW, bold=True))
         return 0
 
-    afrog_bin = _ensure_afrog_installed()
+    afrog_bin = ensure_afrog_installed()
     if not afrog_bin:
         print(_color("[Error] afrog is not installed and auto-install failed.", RED, bold=True))
         print(_color("Install manually: go install github.com/zan8in/afrog/v3/cmd/afrog@latest", YELLOW, bold=True))
         return 1
 
-    targets, skipped, sources = _approved_targets_from_scope(result)
+    targets, skipped, sources = collect_approved_targets(result)
     _print_section("In-Scope Targets For Afrog")
     if targets:
         _print_table(["#", "Approved Target", "Scan Mode"], [[str(i), t, "afrog_baseline"] for i, t in enumerate(targets, start=1)])
@@ -381,52 +280,52 @@ def _run_afrog_safe_step(result, operator_id: str, session_state: Optional[dict]
         print(_color("[Note] No approved targets available for afrog.", YELLOW, bold=True))
         return 0
 
-    out_dir = Path(".bug_bounty_agent/reports") / operator_id / "afrog"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    if session_layout is None:
+        fallback_url = (session_state or {}).get("program_url") or "https://hackerone.com/unknown"
+        session_layout = build_session_layout(operator_id, fallback_url)
+
     progress = _ProgressBar()
-    failures = 0
-
     _print_section("Running Afrog Baseline")
-    for idx, target in enumerate(targets, start=1):
-        progress.update(int((idx - 1) / max(1, len(targets)) * 100), f"afrog {idx}/{len(targets)}: {target}")
-        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
-        out_file = out_dir / f"{slug}_{timestamp}.txt"
-        cmd = [afrog_bin, "-t", target]
-        print(_color(f"[AFROG {idx}/{len(targets)}] trying: {' '.join(cmd)}", WHITE, bold=True))
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        output = [
-            f"$ {' '.join(cmd)}",
-            "",
-            proc.stdout or "",
-            proc.stderr or "",
-        ]
-        out_file.write_text("\n".join(output), encoding="utf-8")
-        if session_state is not None:
-            session_state.setdefault("tested_targets", []).append({"tool": "afrog", "target": target})
-            session_state.setdefault("artifacts", []).append(str(out_file))
-            session_state.setdefault("findings", []).extend(_extract_afrog_findings(out_file, target))
-        if proc.returncode != 0:
-            failures += 1
-            print(_color(f"  -> failed (exit {proc.returncode}); log: {out_file}", RED, bold=True))
-        else:
-            print(_color(f"  -> complete; log: {out_file}", GREEN, bold=True))
 
+    def _on_target(idx: int, total: int, target: str) -> None:
+        progress.update(int((idx - 1) / max(1, total) * 100), f"afrog {idx}/{total}: {target}")
+        print(_color(f"[AFROG {idx}/{total}] trying: {afrog_bin} -t {target}", WHITE, bold=True))
+
+    tool_run = run_afrog_scope(result, session_layout, afrog_bin, on_target=_on_target)
     progress.finish("Afrog scans complete")
-    if failures:
-        print(_color(f"[Status] Afrog finished with {failures} failure(s).", YELLOW, bold=True))
+
+    for item in tool_run.targets:
+        if session_state is not None:
+            session_state.setdefault("tested_targets", []).append({"tool": "afrog", "target": item})
+    for artifact in tool_run.artifacts:
+        out_file = Path(artifact)
+        if session_state is not None:
+            session_state.setdefault("artifacts", []).append(str(out_file))
+            target_guess = out_file.stem.split("_")[0]
+            session_state.setdefault("findings", []).extend(_extract_afrog_findings(out_file, target_guess))
+        print(_color(f"  -> log: {artifact}", GREEN, bold=True))
+    if tool_run.index_file:
+        print(_color(f"[Index] {tool_run.index_file}", CYAN, bold=True))
+
+    if tool_run.failures:
+        print(_color(f"[Status] Afrog finished with {tool_run.failures} failure(s).", YELLOW, bold=True))
         return 1
     print(_color("[Status] Afrog baseline scan completed successfully.", GREEN, bold=True))
     return 0
 
 
-def _run_xss_unified_scope_step(result, operator_id: str, session_state: Optional[dict] = None) -> int:
+def _run_xss_unified_scope_step(
+    result,
+    operator_id: str,
+    session_layout: SessionLayout | None,
+    session_state: Optional[dict] = None,
+) -> int:
     script_path = Path("xss_unified.py")
     if not script_path.exists():
         print(_color("[Error] xss_unified.py not found in project root.", RED, bold=True))
         return 1
 
-    targets, skipped, sources = _xss_targets_from_scope(result)
+    targets, skipped, sources = collect_xss_targets(result)
     _print_section("Scope-Aware XSS Targets")
     if targets:
         _print_table(["#", "In-Scope Target", "XSS Step"], [[str(i), t, "eligible"] for i, t in enumerate(targets, start=1)])
@@ -441,41 +340,33 @@ def _run_xss_unified_scope_step(result, operator_id: str, session_state: Optiona
         print(_color("[Note] No domain targets to run xss_unified.py against.", YELLOW, bold=True))
         return 0
 
-    out_dir = Path(".bug_bounty_agent/reports") / operator_id / "xss_unified"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-    failures = 0
-    max_targets = len(targets)
+    if session_layout is None:
+        fallback_url = (session_state or {}).get("program_url") or "https://hackerone.com/unknown"
+        session_layout = build_session_layout(operator_id, fallback_url)
 
+    max_targets = len(targets)
     _print_section("Running Scope-Aware XSS Step")
     print(_color(f"[Status] Running xss_unified.py for {max_targets} in-scope target(s).", CYAN, bold=True))
-    for idx, target in enumerate(targets[:max_targets], start=1):
-        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
-        out_file = out_dir / f"{slug}_{timestamp}.json"
-        cmd = [
-            sys.executable,
-            str(script_path),
-            "--target",
-            target,
-            "--depth",
-            "1",
-            "--output",
-            str(out_file),
-        ]
-        print(_color(f"[XSS {idx}/{max_targets}] {target}", WHITE, bold=True))
-        proc = subprocess.run(cmd, check=False)
+
+    def _on_target(idx: int, total: int, target: str) -> None:
+        print(_color(f"[XSS {idx}/{total}] {target}", WHITE, bold=True))
+
+    tool_run = run_xss_scope(result, session_layout, script_path, on_target=_on_target)
+    for target in tool_run.targets:
         if session_state is not None:
             session_state.setdefault("tested_targets", []).append({"tool": "xss_unified", "target": target})
+    for artifact in tool_run.artifacts:
+        out_file = Path(artifact)
+        target_guess = out_file.stem.split("_")[0]
+        if session_state is not None:
             session_state.setdefault("artifacts", []).append(str(out_file))
-            session_state.setdefault("findings", []).extend(_extract_xss_findings(out_file, target))
-        if proc.returncode != 0:
-            failures += 1
-            print(_color(f"  -> failed (exit {proc.returncode})", RED, bold=True))
-        else:
-            print(_color(f"  -> report: {out_file}", GREEN, bold=True))
+            session_state.setdefault("findings", []).extend(_extract_xss_findings(out_file, target_guess))
+        print(_color(f"  -> report: {artifact}", GREEN, bold=True))
+    if tool_run.index_file:
+        print(_color(f"[Index] {tool_run.index_file}", CYAN, bold=True))
 
-    if failures:
-        print(_color(f"[Status] XSS step completed with {failures} failure(s).", YELLOW, bold=True))
+    if tool_run.failures:
+        print(_color(f"[Status] XSS step completed with {tool_run.failures} failure(s).", YELLOW, bold=True))
         return 1
     print(_color("[Status] XSS step completed successfully.", GREEN, bold=True))
     return 0
@@ -547,7 +438,15 @@ def _extract_afrog_findings(report_file: Path, target: str) -> list[dict]:
     return findings
 
 
-def _generate_automatic_report(result, operator_id: str, session_state: dict) -> str:
+def _generate_automatic_report(
+    result,
+    operator_id: str,
+    session_state: dict,
+    session_layout: SessionLayout | None = None,
+) -> str:
+    if session_layout is not None:
+        return compile_session_report(session_layout, session_state)
+
     out_dir = Path(".bug_bounty_agent/reports") / operator_id
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
@@ -893,6 +792,7 @@ def main() -> int:
         "tested_targets": [],
         "artifacts": [],
         "findings": [],
+        "session_layout": None,
     }
 
     # Non-interactive / direct-command modes run intake immediately.
@@ -911,9 +811,21 @@ def main() -> int:
         result = run_recon(program_url, program_hint)
         session_state["program_url"] = program_url
         session_state["recon_done"] = True
+        if program_url:
+            layout = build_session_layout(args.operator_id, program_url)
+            session_state["session_layout"] = layout
+            profile_path = persist_recon_profile(layout, result, program_url, program_hint)
+            session_state.setdefault("artifacts", []).append(profile_path)
+            session_state.setdefault("steps", []).append(f"Session initialized: {layout.session_id}")
+            session_state.setdefault("steps", []).append(f"RECON profile saved: {profile_path}")
         session_state.setdefault("steps", []).append("RECON completed (non-interactive/direct mode).")
         if args.run_xss_unified:
-            return _run_xss_unified_scope_step(result, args.operator_id, session_state=session_state)
+            return _run_xss_unified_scope_step(
+                result,
+                args.operator_id,
+                session_layout=session_state.get("session_layout"),
+                session_state=session_state,
+            )
         _render_all_steps(result)
         print(_color("[Quit] Non-interactive run complete.", RED, bold=True))
         return 0
@@ -944,6 +856,12 @@ def main() -> int:
             intake_viewed = True
             session_state["program_url"] = program_url
             session_state["recon_done"] = True
+            layout = build_session_layout(args.operator_id, program_url)
+            session_state["session_layout"] = layout
+            profile_path = persist_recon_profile(layout, result, program_url, program_hint)
+            session_state.setdefault("artifacts", []).append(profile_path)
+            session_state.setdefault("steps", []).append(f"Session initialized: {layout.session_id}")
+            session_state.setdefault("steps", []).append(f"RECON profile saved: {profile_path}")
             session_state.setdefault("steps", []).append(f"RECON completed for {program_url}.")
         elif choice == "2":
             if not intake_viewed:
@@ -992,13 +910,23 @@ def main() -> int:
                     if not optional_deps.ok:
                         print(_color("[Note] Continuing XSS scan without optional DOM browser checks if selenium is unavailable.", YELLOW, bold=True))
                     _render_step_2(result)
-                    rc = _run_xss_unified_scope_step(result, args.operator_id, session_state=session_state)
+                    rc = _run_xss_unified_scope_step(
+                        result,
+                        args.operator_id,
+                        session_layout=session_state.get("session_layout"),
+                        session_state=session_state,
+                    )
                     if rc == 0:
                         tests_done = True
                         session_state.setdefault("steps", []).append("TESTS completed: XSS unified scan executed.")
                 elif mode_choice == "a":
                     _render_step_2(result)
-                    rc = _run_afrog_safe_step(result, args.operator_id, session_state=session_state)
+                    rc = _run_afrog_safe_step(
+                        result,
+                        args.operator_id,
+                        session_layout=session_state.get("session_layout"),
+                        session_state=session_state,
+                    )
                     if rc == 0:
                         tests_done = True
                         session_state.setdefault("steps", []).append("TESTS completed: Afrog baseline scan executed.")
@@ -1010,7 +938,12 @@ def main() -> int:
             if not intake_viewed:
                 print(_color("Run RECON first.", YELLOW, bold=True))
                 continue
-            auto_report_path = _generate_automatic_report(result, args.operator_id, session_state)
+            auto_report_path = _generate_automatic_report(
+                result,
+                args.operator_id,
+                session_state,
+                session_layout=session_state.get("session_layout"),
+            )
             session_state.setdefault("artifacts", []).append(auto_report_path)
             session_state.setdefault("steps", []).append("REPORTING invoked: automatic session report generated.")
             print(_color(f"[Auto Report] {auto_report_path}", GREEN, bold=True))

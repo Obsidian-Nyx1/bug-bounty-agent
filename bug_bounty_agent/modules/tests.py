@@ -1,0 +1,229 @@
+"""TESTS module: execute tool runs and persist structured test artifacts."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+from typing import Callable, Optional
+from urllib.parse import urlparse
+
+from bug_bounty_agent.modules.schemas import SessionLayout, ensure_layout
+
+DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
+URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
+
+
+@dataclass
+class ToolRunResult:
+    failures: int
+    artifacts: list[str]
+    targets: list[str]
+    index_file: str | None
+
+
+def collect_xss_targets(result) -> tuple[list[str], list[str], list[str]]:
+    candidates: list[tuple[str, str]] = []
+    for item in result.scope_data.in_scope:
+        candidates.append((item, "recon_scope"))
+    for item in getattr(result, "discovery", []).in_scope_domains if hasattr(result, "discovery") else []:
+        candidates.append((item, "recon_discovery_scope"))
+    for signal in getattr(result, "notes", []):
+        for found in URL_RE.findall(signal):
+            candidates.append((found, "recon_notes_url"))
+    for signal in getattr(result, "downloaded_artifact_reasons", []):
+        for found in URL_RE.findall(signal):
+            candidates.append((found, "download_artifact_url"))
+    for test in result.test_matrix:
+        if test.category.strip().lower() != "xss":
+            continue
+        if "verified_in_scope" not in (test.scope_basis or ""):
+            continue
+        candidates.append((test.target, f"suggested_test_{test.test_id}"))
+    if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
+        candidates.append((result.recommendation.domain, "recommendation"))
+    return _normalize_candidates(candidates)
+
+
+def collect_approved_targets(result) -> tuple[list[str], list[str], list[str]]:
+    candidates: list[tuple[str, str]] = []
+    for item in result.scope_data.in_scope:
+        candidates.append((item, "recon_scope"))
+    for test in result.test_matrix:
+        if "verified_in_scope" not in (test.scope_basis or ""):
+            continue
+        candidates.append((test.target, f"suggested_test_{test.test_id}"))
+    if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
+        candidates.append((result.recommendation.domain, "recommendation"))
+    return _normalize_candidates(candidates)
+
+
+def _normalize_candidates(candidates: list[tuple[str, str]]) -> tuple[list[str], list[str], list[str]]:
+    valid: list[str] = []
+    skipped: list[str] = []
+    used_sources: list[str] = []
+    for item, source in candidates:
+        normalized = _normalize_target(item)
+        if not normalized:
+            skipped.append(item)
+            continue
+        if normalized not in valid:
+            valid.append(normalized)
+            used_sources.append(f"{normalized} <- {source}")
+    return valid, skipped, used_sources
+
+
+def _normalize_target(item: str) -> str | None:
+    raw = (item or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("*."):
+        raw = raw[2:]
+    low = raw.lower()
+    if low.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return raw.rstrip("/")
+        return None
+    if DOMAIN_RE.match(low):
+        return f"https://{low}"
+    return None
+
+
+def run_xss_scope(
+    result,
+    layout: SessionLayout,
+    script_path: Path,
+    on_target: Optional[Callable[[int, int, str], None]] = None,
+) -> ToolRunResult:
+    ensure_layout(layout)
+    targets, _, _ = collect_xss_targets(result)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    out_dir = layout.tests_dir / "xss_unified"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    failures = 0
+    artifacts: list[str] = []
+    run_index: list[dict] = []
+    for idx, target in enumerate(targets, start=1):
+        if on_target:
+            on_target(idx, len(targets), target)
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
+        out_file = out_dir / f"{slug}_{timestamp}.json"
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--target",
+            target,
+            "--depth",
+            "1",
+            "--output",
+            str(out_file),
+        ]
+        proc = subprocess.run(cmd, check=False)
+        artifacts.append(str(out_file))
+        run_index.append(
+            {
+                "tool": "xss_unified",
+                "target": target,
+                "command": cmd,
+                "output": str(out_file),
+                "exit_code": proc.returncode,
+            }
+        )
+        if proc.returncode != 0:
+            failures += 1
+
+    index_file = _append_test_index(layout, "xss_unified", run_index, timestamp)
+    return ToolRunResult(failures=failures, artifacts=artifacts, targets=targets, index_file=index_file)
+
+
+def find_afrog_binary() -> Optional[str]:
+    found = shutil.which("afrog")
+    if found:
+        return found
+    go_bin = Path.home() / "go" / "bin" / "afrog"
+    if go_bin.exists():
+        return str(go_bin)
+    return None
+
+
+def ensure_afrog_installed() -> Optional[str]:
+    existing = find_afrog_binary()
+    if existing:
+        return existing
+    install_cmds = [
+        ["go", "install", "github.com/zan8in/afrog/v3/cmd/afrog@latest"],
+        ["go", "install", "github.com/zan8in/afrog/cmd/afrog@latest"],
+    ]
+    for cmd in install_cmds:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception:
+            continue
+        if proc.returncode == 0:
+            installed = find_afrog_binary()
+            if installed:
+                return installed
+    return find_afrog_binary()
+
+
+def run_afrog_scope(
+    result,
+    layout: SessionLayout,
+    afrog_bin: str,
+    on_target: Optional[Callable[[int, int, str], None]] = None,
+) -> ToolRunResult:
+    ensure_layout(layout)
+    targets, _, _ = collect_approved_targets(result)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    out_dir = layout.tests_dir / "afrog"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    failures = 0
+    artifacts: list[str] = []
+    run_index: list[dict] = []
+    for idx, target in enumerate(targets, start=1):
+        if on_target:
+            on_target(idx, len(targets), target)
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
+        out_file = out_dir / f"{slug}_{timestamp}.txt"
+        cmd = [afrog_bin, "-t", target]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        output = [f"$ {' '.join(cmd)}", "", proc.stdout or "", proc.stderr or ""]
+        out_file.write_text("\n".join(output), encoding="utf-8")
+        artifacts.append(str(out_file))
+        run_index.append(
+            {
+                "tool": "afrog",
+                "target": target,
+                "command": cmd,
+                "output": str(out_file),
+                "exit_code": proc.returncode,
+            }
+        )
+        if proc.returncode != 0:
+            failures += 1
+
+    index_file = _append_test_index(layout, "afrog", run_index, timestamp)
+    return ToolRunResult(failures=failures, artifacts=artifacts, targets=targets, index_file=index_file)
+
+
+def _append_test_index(layout: SessionLayout, tool: str, entries: list[dict], timestamp: str) -> str:
+    payload = {"last_updated": datetime.now(timezone.utc).isoformat(), "runs": []}
+    if layout.tests_index_file.exists():
+        try:
+            payload = json.loads(layout.tests_index_file.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {"last_updated": datetime.now(timezone.utc).isoformat(), "runs": []}
+
+    payload.setdefault("runs", []).append({"tool": tool, "timestamp": timestamp, "entries": entries})
+    payload["last_updated"] = datetime.now(timezone.utc).isoformat()
+    layout.tests_index_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return str(layout.tests_index_file)
+
