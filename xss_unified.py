@@ -21,6 +21,7 @@ import re
 import string
 import sys
 import time
+import urllib.parse
 from collections import deque
 from urllib.parse import urljoin, urlparse
 
@@ -58,6 +59,61 @@ WAF_SIGNATURES = [
     (r'ModSecurity', 'ModSecurity'),
     (r'Amazon Web Services', 'AWS WAF'),
 ]
+
+
+def _extract_host(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return (urlparse(raw).hostname or "").lower()
+    if raw.startswith("*."):
+        return raw[2:]
+    return raw.split("/")[0]
+
+
+def _load_scope_patterns(scope_file: str | None, scope_targets: list[str] | None) -> list[str]:
+    patterns: list[str] = []
+    if scope_targets:
+        for item in scope_targets:
+            host = _extract_host(item)
+            if host and host not in patterns:
+                patterns.append(host)
+    if scope_file and os.path.exists(scope_file):
+        with open(scope_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                low = line.strip().lower()
+                if not low or low.startswith("#"):
+                    continue
+                if "out-of-scope" in low or low.startswith("oos:") or "excluded" in low:
+                    continue
+                if ":" in low:
+                    _, _, candidate = low.partition(":")
+                    low = candidate.strip()
+                host = _extract_host(low)
+                if host and host not in patterns:
+                    patterns.append(host)
+    return patterns
+
+
+def _build_scope_checker(scope_patterns: list[str]):
+    normalized = [p.lower().lstrip(".") for p in scope_patterns if p]
+
+    def is_in_scope(url_or_host: str) -> bool:
+        raw = (url_or_host or "").strip()
+        if not raw:
+            return False
+        host = _extract_host(raw)
+        if not host:
+            return False
+        if not normalized:
+            return True
+        for pattern in normalized:
+            if host == pattern or host.endswith("." + pattern):
+                return True
+        return False
+
+    return is_in_scope
 
 
 class LiveBar:
@@ -249,7 +305,7 @@ def apply_evasion(payload, waf_type=None):
 # Crawler (supports both sync and async)
 # ----------------------------------------------------------------------
 class Crawler:
-    def __init__(self, start_url, max_depth, cookies=None, path_filter=None, delay=0, jitter=0, proxy=None):
+    def __init__(self, start_url, max_depth, cookies=None, path_filter=None, delay=0, jitter=0, proxy=None, scope_checker=None):
         self.start_url = start_url
         self.base_domain = urlparse(start_url).netloc
         self.max_depth = max_depth
@@ -258,6 +314,7 @@ class Crawler:
         self.delay = delay
         self.jitter = jitter
         self.proxy = proxy
+        self.scope_checker = scope_checker
         self.visited = set()
         self.urls_to_visit = deque()
         self.urls_to_visit.append((start_url, 0))
@@ -298,7 +355,7 @@ class Crawler:
                 self.all_urls.add(url)
                 forms = extract_forms(url, html)
                 self.all_forms.extend(forms)
-                links = get_links(url, html, self.base_domain)
+                links = get_links(url, html, self.base_domain, self.scope_checker)
                 for link in links:
                     if link not in self.visited:
                         self.urls_to_visit.append((link, depth+1))
@@ -325,7 +382,7 @@ class Crawler:
                 self.all_urls.add(url)
                 forms = extract_forms(url, html)
                 self.all_forms.extend(forms)
-                links = get_links(url, html, self.base_domain)
+                links = get_links(url, html, self.base_domain, self.scope_checker)
                 for link in links:
                     if link not in self.visited:
                         self.urls_to_visit.append((link, depth+1))
@@ -354,13 +411,17 @@ def extract_forms(url, html):
         forms.append({'action':action, 'method':method, 'inputs':inputs, 'original_url':url})
     return forms
 
-def get_links(url, html, base_domain):
+def get_links(url, html, base_domain, scope_checker=None):
     soup = BeautifulSoup(html, 'html.parser')
     links = set()
     for a in soup.find_all('a', href=True):
         href = a['href']
         full = urljoin(url, href)
-        if urlparse(full).netloc == base_domain:
+        netloc = urlparse(full).netloc
+        if scope_checker:
+            if scope_checker(full):
+                links.add(full)
+        elif netloc == base_domain:
             links.add(full)
     return links
 
@@ -490,7 +551,7 @@ def test_dom_xss(tester, urls, dom_payloads, findings, limit=0):
     return findings
 
 
-def test_wordpress_notices(target, cookies, findings, delay=0, jitter=0, proxy=None):
+def test_wordpress_notices(target, cookies, findings, delay=0, jitter=0, proxy=None, scope_checker=None):
     """Crawl WordPress admin area and check for unescaped notices."""
     print("[*] Testing WordPress admin notices...")
     # Create a crawler restricted to /wp-admin/
@@ -501,7 +562,8 @@ def test_wordpress_notices(target, cookies, findings, delay=0, jitter=0, proxy=N
         path_filter=lambda u: '/wp-admin/' in u,
         delay=delay,
         jitter=jitter,
-        proxy=proxy
+        proxy=proxy,
+        scope_checker=scope_checker,
     )
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -513,7 +575,7 @@ def test_wordpress_notices(target, cookies, findings, delay=0, jitter=0, proxy=N
         return findings
 
     # Create a temporary tester just for notice checking
-    tester = XSSTester(cookies=cookies, delay=delay, jitter=jitter, proxy=proxy)
+    tester = XSSTester(cookies=cookies, delay=delay, jitter=jitter, proxy=proxy, scope_checker=scope_checker)
     wp_findings = tester.check_wordpress_admin_notices(admin_urls)
     if wp_findings:
         print(f"  [!] Found {len(wp_findings)} potentially vulnerable admin notices.")
@@ -529,7 +591,7 @@ def test_wordpress_notices(target, cookies, findings, delay=0, jitter=0, proxy=N
 # ----------------------------------------------------------------------
 class XSSTester:
     def __init__(self, cookies=None, use_headless=False, collaborator=None,
-                 delay=0, jitter=0, max_workers=20, proxy=None, waf_mode=False):
+                 delay=0, jitter=0, max_workers=20, proxy=None, waf_mode=False, scope_checker=None):
         self.cookies = cookies or {}
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
@@ -542,6 +604,7 @@ class XSSTester:
         self.proxy = proxy
         self.waf_mode = waf_mode
         self.detected_waf = None
+        self.scope_checker = scope_checker
         self.driver = None
         if use_headless and SELENIUM_AVAILABLE:
             try:
@@ -566,6 +629,8 @@ class XSSTester:
 
     async def test_reflected_param_async(self, session, url, param, payloads):
         """Async version for reflected param testing."""
+        if self.scope_checker and not self.scope_checker(url):
+            return []
         parsed = urlparse(url)
         qs = dict(urllib.parse.parse_qsl(parsed.query))
         findings = []
@@ -592,6 +657,8 @@ class XSSTester:
 
     def test_reflected_param_sync(self, url, param, payloads):
         """Sync version for reflected param testing."""
+        if self.scope_checker and not self.scope_checker(url):
+            return []
         parsed = urlparse(url)
         qs = dict(urllib.parse.parse_qsl(parsed.query))
         findings = []
@@ -619,6 +686,8 @@ class XSSTester:
     def test_reflected_form(self, form, payloads):
         """Sync reflected form testing."""
         action = urljoin(form.get('original_url', ''), form.get('action') or '')
+        if self.scope_checker and not self.scope_checker(action):
+            return []
         method = (form.get('method') or 'get').lower()
         findings = []
         for payload in payloads:
@@ -654,6 +723,8 @@ class XSSTester:
 
     def inject_stored_payload(self, form, payload):
         action = urljoin(form.get('original_url', ''), form.get('action') or '')
+        if self.scope_checker and not self.scope_checker(action):
+            return False
         method = (form.get('method') or 'get').lower()
         data = {}
         for inp in form.get('inputs', []):
@@ -677,6 +748,8 @@ class XSSTester:
     def check_stored_payload(self, urls, payload):
         found = []
         for url in urls:
+            if self.scope_checker and not self.scope_checker(url):
+                continue
             try:
                 resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
                 if payload in resp.text:
@@ -686,6 +759,8 @@ class XSSTester:
         return found
 
     def test_dom(self, url, payload):
+        if self.scope_checker and not self.scope_checker(url):
+            return False
         if not self.use_headless or not self.driver:
             return False
         try:
@@ -712,6 +787,8 @@ class XSSTester:
             'onerror', 'onload', 'onmouseover', 'onclick'
         ]
         for url in admin_urls:
+            if self.scope_checker and not self.scope_checker(url):
+                continue
             try:
                 resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
                 soup = BeautifulSoup(resp.text, 'html.parser')
@@ -766,6 +843,8 @@ def main():
     parser.add_argument("--waf-evasion", action="store_true", help="Enable WAF detection & adaptive evasion")
     parser.add_argument("--no-wp", action="store_true", help="Skip WordPress admin notice checks")
     parser.add_argument("--no-instructions", action="store_true", help="Hide startup quick instructions block")
+    parser.add_argument("--scope-file", help="Path to scope file (in-scope hosts/URLs).")
+    parser.add_argument("--scope-target", action="append", help="Additional in-scope host/URL (repeatable).")
     args = parser.parse_args()
 
     if not args.no_instructions:
@@ -799,6 +878,15 @@ def main():
         parser.error("target is required (positional or --target)")
     if not target.startswith('http'):
         target = 'http://' + target
+
+    target_host = _extract_host(target)
+    scope_patterns = _load_scope_patterns(args.scope_file, args.scope_target)
+    strict_scope = bool(args.scope_file or args.scope_target)
+    if not strict_scope and target_host and target_host not in scope_patterns:
+        scope_patterns.insert(0, target_host)
+    scope_checker = _build_scope_checker(scope_patterns)
+    if strict_scope and not scope_checker(target):
+        parser.error(f"target is out of scope: {target}")
 
     # Cookies
     cookies = {}
@@ -840,13 +928,14 @@ def main():
         jitter=args.jitter,
         max_workers=args.workers,
         proxy=args.proxy,
-        waf_mode=args.waf_evasion
+        waf_mode=args.waf_evasion,
+        scope_checker=scope_checker,
     )
 
     # Crawl
     phase.update("crawling target surface", 60)
     crawler = Crawler(target, max_depth=args.depth, cookies=cookies,
-                      delay=args.delay, jitter=args.jitter, proxy=args.proxy)
+                      delay=args.delay, jitter=args.jitter, proxy=args.proxy, scope_checker=scope_checker)
     loop = None
     if args.async_mode:
         async def run_async_crawl():
@@ -894,6 +983,7 @@ def main():
             delay=args.delay,
             jitter=args.jitter,
             proxy=args.proxy,
+            scope_checker=scope_checker,
         )
 
     phase.update(f"reflected findings={len(findings['reflected'])}", 97)
