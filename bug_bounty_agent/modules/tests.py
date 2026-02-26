@@ -130,11 +130,13 @@ def run_xss_scope(
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        html_artifacts: list[str] = []
         for idx, target in enumerate(targets, start=1):
             if on_target:
                 on_target(idx, len(targets), target)
             tmp_output = Path(tmpdir) / f"target_{idx}.json"
-            tmp_html = Path(tmpdir) / f"target_{idx}.html"
+            slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", target)
+            html_output = out_dir / f"{slug}_{timestamp}.html"
             cmd = [
                 sys.executable,
                 str(script_path),
@@ -152,7 +154,7 @@ def run_xss_scope(
             if use_waf_evasion:
                 cmd.append("--waf-evasion")
             if html_report:
-                cmd.extend(["--html-report", str(tmp_html)])
+                cmd.extend(["--html-report", str(html_output)])
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
             target_data: dict = {}
             if tmp_output.exists():
@@ -191,6 +193,17 @@ def run_xss_scope(
                 failures += 1
                 combined["summary"]["failed_targets"] += 1
                 entry["error"] = (proc.stderr or proc.stdout or "").strip()[:500]
+
+            # Keep HTML report only when it exists and is not empty.
+            if html_report and html_output.exists():
+                if html_output.stat().st_size > 0:
+                    html_artifacts.append(str(html_output))
+                    entry["html_report"] = str(html_output)
+                else:
+                    try:
+                        html_output.unlink()
+                    except Exception:
+                        pass
             combined["targets"].append(entry)
 
     combined_file.write_text(json.dumps(combined, indent=2), encoding="utf-8")
@@ -206,7 +219,7 @@ def run_xss_scope(
     index_file = _append_test_index(layout, "xss_unified", run_index, timestamp)
     return ToolRunResult(
         failures=failures,
-        artifacts=[str(combined_file)],
+        artifacts=[str(combined_file), *html_artifacts],
         targets=targets,
         index_file=index_file,
     )

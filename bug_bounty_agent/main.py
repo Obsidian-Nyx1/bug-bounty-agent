@@ -195,7 +195,8 @@ def _show_reporting_menu() -> None:
         ["Input", "Action"],
         [
             ["d", "Save downloaded-documents manifest"],
-            ["c", "Create a custom report note"],
+            ["c", "Create custom/combined report"],
+            ["l", "List all generated reports/artifacts"],
             ["v", "View current compiled report details"],
             ["b", "Back to main menu"],
         ],
@@ -781,23 +782,132 @@ def _save_download_manifest(result, operator_id: str) -> str:
     return str(out_file)
 
 
-def _save_custom_report(operator_id: str) -> str | None:
+def _collect_report_artifacts(
+    session_layout: SessionLayout | None,
+    session_state: dict | None,
+    operator_id: str,
+) -> list[str]:
+    collected: set[str] = set()
+    if session_state:
+        for item in session_state.get("artifacts", []):
+            p = Path(str(item))
+            if p.exists() and p.is_file():
+                collected.add(str(p))
+    if session_layout:
+        roots = [session_layout.reports_dir, session_layout.tests_dir, session_layout.recon_dir]
+        for root in roots:
+            if not root.exists():
+                continue
+            for ext in ("*.md", "*.json", "*.html", "*.txt", "*.csv"):
+                for p in root.rglob(ext):
+                    if p.is_file():
+                        collected.add(str(p))
+    legacy = Path(".bug_bounty_agent/reports") / operator_id
+    if legacy.exists():
+        for ext in ("*.md", "*.json", "*.html", "*.txt", "*.csv"):
+            for p in legacy.rglob(ext):
+                if p.is_file():
+                    collected.add(str(p))
+    return sorted(collected)
+
+
+def _render_report_inventory(session_layout: SessionLayout | None, session_state: dict | None, operator_id: str) -> list[str]:
+    reports = _collect_report_artifacts(session_layout, session_state, operator_id)
+    _print_section("Report Inventory")
+    if reports:
+        _print_table(["#", "Report Artifact"], [[str(i), p] for i, p in enumerate(reports, start=1)])
+    else:
+        _print_table(["#", "Report Artifact"], [["1", "No reports found yet"]])
+    return reports
+
+
+def _save_custom_report(
+    operator_id: str,
+    session_layout: SessionLayout | None = None,
+    session_state: dict | None = None,
+) -> str | None:
+    _print_section("Custom Report")
+    _print_table(
+        ["Input", "Mode"],
+        [
+            ["1", "Combine ALL available reports"],
+            ["2", "Combine SELECTED reports by index"],
+            ["3", "Create note-only custom report"],
+        ],
+    )
+    mode = input(_color("Choose custom report mode (1/2/3): ", CYAN, bold=True)).strip()
     title = input(_color("Custom report title: ", CYAN, bold=True)).strip() or "Custom Report"
-    note = input(_color("Custom report note: ", CYAN, bold=True)).strip()
-    if not note:
-        return None
     out_dir = Path(".bug_bounty_agent/reports") / operator_id
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
     out_file = out_dir / f"custom_report_{timestamp}.md"
+
+    if mode == "3":
+        note = input(_color("Custom report note: ", CYAN, bold=True)).strip()
+        if not note:
+            return None
+        lines = [
+            f"# {title}",
+            "",
+            f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+            "",
+            "## Note",
+            note,
+        ]
+        out_file.write_text("\n".join(lines), encoding="utf-8")
+        return str(out_file)
+
+    reports = _collect_report_artifacts(session_layout, session_state, operator_id)
+    if not reports:
+        print(_color("[Note] No report artifacts available to combine.", YELLOW, bold=True))
+        return None
+
+    selected: list[str] = []
+    if mode == "1":
+        selected = reports
+    elif mode == "2":
+        _print_table(["#", "Report Artifact"], [[str(i), p] for i, p in enumerate(reports, start=1)])
+        raw = input(_color("Enter indexes (comma-separated): ", CYAN, bold=True)).strip()
+        if not raw:
+            return None
+        idxs: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if part.isdigit():
+                idxs.append(int(part))
+        for i in idxs:
+            if 1 <= i <= len(reports):
+                selected.append(reports[i - 1])
+    else:
+        print(_color("Invalid mode. Use 1, 2, or 3.", RED, bold=True))
+        return None
+
+    if not selected:
+        print(_color("[Note] No report artifacts selected.", YELLOW, bold=True))
+        return None
+
     lines = [
         f"# {title}",
         "",
         f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"- Combined sources: {len(selected)}",
         "",
-        "## Note",
-        note,
     ]
+    for src in selected:
+        lines.append(f"## Source: {src}")
+        try:
+            text = Path(src).read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            lines.append(f"- Could not read source: {exc}")
+            lines.append("")
+            continue
+        # Keep combined report readable and bounded.
+        snippet = text[:8000]
+        lines.append("```text")
+        lines.append(snippet)
+        lines.append("```")
+        lines.append("")
+
     out_file.write_text("\n".join(lines), encoding="utf-8")
     return str(out_file)
 
@@ -1248,18 +1358,28 @@ def main() -> int:
                     out = _save_download_manifest(result, args.operator_id)
                     print(_color(f"[Saved] Download manifest: {out}", GREEN, bold=True))
                 elif r_choice in {"c", "custom"}:
-                    out = _save_custom_report(args.operator_id)
+                    out = _save_custom_report(
+                        args.operator_id,
+                        session_layout=session_state.get("session_layout"),
+                        session_state=session_state,
+                    )
                     if out:
                         print(_color(f"[Saved] Custom report: {out}", GREEN, bold=True))
                     else:
                         print(_color("[Note] Custom report was not saved (empty note).", YELLOW, bold=True))
+                elif r_choice in {"l", "list"}:
+                    _render_report_inventory(
+                        session_layout=session_state.get("session_layout"),
+                        session_state=session_state,
+                        operator_id=args.operator_id,
+                    )
                 elif r_choice in {"v", "view"}:
                     if not tests_done:
                         print(_color("[Note] No test execution recorded yet. Showing current compiled details.", YELLOW, bold=True))
                     _render_step_4(result)
                     _render_documentation(result)
                 else:
-                    print(_color("Invalid reporting command. Use: show options | download | custom | view | back", RED, bold=True))
+                    print(_color("Invalid reporting command. Use: show options | download | custom | list | view | back", RED, bold=True))
             continue
 
         print(_color("Unknown command. Type `show options` or `help`.", RED, bold=True))

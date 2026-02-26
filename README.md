@@ -68,6 +68,7 @@ When starting `xss` from the agent, you now get:
 - runtime estimate
 - optional background run when estimate is high
 - running-status notifications in the main prompt
+- non-empty HTML artifacts only (empty HTML files are discarded)
 
 Inside REPORTING console (`bug_bounty/report>>`):
 
@@ -75,6 +76,7 @@ Inside REPORTING console (`bug_bounty/report>>`):
 show options
 download
 custom
+list
 view
 back
 ```
