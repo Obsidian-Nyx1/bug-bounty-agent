@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from bug_bounty_agent.modules.schemas import SessionLayout, ensure_layout
+from bug_bounty_agent.scope import classify_domain
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
 URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
@@ -34,12 +35,6 @@ def collect_xss_targets(result) -> tuple[list[str], list[str], list[str]]:
         candidates.append((item, "recon_scope"))
     for item in getattr(result, "discovery", []).in_scope_domains if hasattr(result, "discovery") else []:
         candidates.append((item, "recon_discovery_scope"))
-    for signal in getattr(result, "notes", []):
-        for found in URL_RE.findall(signal):
-            candidates.append((found, "recon_notes_url"))
-    for signal in getattr(result, "downloaded_artifact_reasons", []):
-        for found in URL_RE.findall(signal):
-            candidates.append((found, "download_artifact_url"))
     for test in result.test_matrix:
         if test.category.strip().lower() != "xss":
             continue
@@ -48,7 +43,7 @@ def collect_xss_targets(result) -> tuple[list[str], list[str], list[str]]:
         candidates.append((test.target, f"suggested_test_{test.test_id}"))
     if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
         candidates.append((result.recommendation.domain, "recommendation"))
-    return _normalize_candidates(candidates)
+    return _normalize_candidates(candidates, result=result)
 
 
 def collect_approved_targets(result) -> tuple[list[str], list[str], list[str]]:
@@ -61,10 +56,10 @@ def collect_approved_targets(result) -> tuple[list[str], list[str], list[str]]:
         candidates.append((test.target, f"suggested_test_{test.test_id}"))
     if result.recommendation and result.recommendation.domain and result.recommendation.status == "in-scope":
         candidates.append((result.recommendation.domain, "recommendation"))
-    return _normalize_candidates(candidates)
+    return _normalize_candidates(candidates, result=result)
 
 
-def _normalize_candidates(candidates: list[tuple[str, str]]) -> tuple[list[str], list[str], list[str]]:
+def _normalize_candidates(candidates: list[tuple[str, str]], result=None) -> tuple[list[str], list[str], list[str]]:
     valid: list[str] = []
     skipped: list[str] = []
     used_sources: list[str] = []
@@ -73,6 +68,15 @@ def _normalize_candidates(candidates: list[tuple[str, str]]) -> tuple[list[str],
         if not normalized:
             skipped.append(item)
             continue
+        host = (urlparse(normalized).hostname or "").lower()
+        if host in {"hackerone.com", "www.hackerone.com"}:
+            skipped.append(item)
+            continue
+        if result is not None and hasattr(result, "scope_data"):
+            scope_status = classify_domain(host, result.scope_data)
+            if scope_status != "in-scope":
+                skipped.append(item)
+                continue
         if normalized not in valid:
             valid.append(normalized)
             used_sources.append(f"{normalized} <- {source}")
@@ -140,8 +144,8 @@ def run_xss_scope(
             cmd = [
                 sys.executable,
                 str(script_path),
-                "--target",
                 target,
+                "--non-interactive",
                 "--depth",
                 "1",
                 "--output",
@@ -151,8 +155,6 @@ def run_xss_scope(
                 cmd.append("--async-mode")
             if use_headless:
                 cmd.append("--headless")
-            if use_waf_evasion:
-                cmd.append("--waf-evasion")
             if html_report:
                 cmd.extend(["--html-report", str(html_output)])
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)

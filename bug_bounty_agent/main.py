@@ -932,19 +932,17 @@ def _prompt_xss_options() -> dict:
         [
             ["Headless DOM mode", "--headless", "on"],
             ["Async mode", "--async-mode", "on"],
-            ["WAF evasion mode", "--waf-evasion", "off"],
+            ["WAF fingerprinting", "--no-waf (toggle inside scanner)", "on"],
             ["HTML report", "--html-report report.html", "on"],
         ],
     )
-    print(_color("[Warning] Use WAF mode only when explicitly authorized by program policy.", YELLOW, bold=True))
     headless = input(_color("Enable --headless? (Y/n): ", MAGENTA, bold=True)).strip().lower() not in {"n", "no"}
     async_mode = input(_color("Enable --async-mode? (Y/n): ", MAGENTA, bold=True)).strip().lower() not in {"n", "no"}
-    waf = input(_color("Enable --waf-evasion? (y/N): ", MAGENTA, bold=True)).strip().lower() in {"y", "yes"}
     html = input(_color("Enable --html-report? (Y/n): ", MAGENTA, bold=True)).strip().lower() not in {"n", "no"}
     return {
         "use_headless": headless,
         "use_async_mode": async_mode,
-        "use_waf_evasion": waf,
+        "use_waf_evasion": False,
         "html_report": html,
     }
 
