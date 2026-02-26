@@ -489,6 +489,41 @@ def test_dom_xss(tester, urls, dom_payloads, findings, limit=0):
                 findings['dom'].append({'url': test_url, 'type': 'fragment', 'payload': payload})
     return findings
 
+
+def test_wordpress_notices(target, cookies, findings, delay=0, jitter=0, proxy=None):
+    """Crawl WordPress admin area and check for unescaped notices."""
+    print("[*] Testing WordPress admin notices...")
+    # Create a crawler restricted to /wp-admin/
+    admin_crawler = Crawler(
+        start_url=target,
+        max_depth=1,
+        cookies=cookies,
+        path_filter=lambda u: '/wp-admin/' in u,
+        delay=delay,
+        jitter=jitter,
+        proxy=proxy
+    )
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.update(cookies)
+    admin_urls, _ = admin_crawler.crawl_sync(session)
+
+    if not admin_urls:
+        print("[*] No admin URLs found.")
+        return findings
+
+    # Create a temporary tester just for notice checking
+    tester = XSSTester(cookies=cookies, delay=delay, jitter=jitter, proxy=proxy)
+    wp_findings = tester.check_wordpress_admin_notices(admin_urls)
+    if wp_findings:
+        print(f"  [!] Found {len(wp_findings)} potentially vulnerable admin notices.")
+        findings['wordpress_admin_notices'] = wp_findings
+        for f in wp_findings:
+            print(f"      {f['url']} : {f['notice_html'][:80]}...")
+    else:
+        print("[*] No unescaped admin notices detected.")
+    return findings
+
 # ----------------------------------------------------------------------
 # XSS Tester (supports async for reflected)
 # ----------------------------------------------------------------------
@@ -670,6 +705,34 @@ class XSSTester:
             print(f"DOM test error: {e}")
         return False
 
+    def check_wordpress_admin_notices(self, admin_urls):
+        findings = []
+        dangerous_tags = [
+            'script', 'iframe', 'object', 'embed', 'form', 'input', 'button',
+            'onerror', 'onload', 'onmouseover', 'onclick'
+        ]
+        for url in admin_urls:
+            try:
+                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                notices = soup.find_all('div', class_=re.compile(r'notice'))
+                for notice in notices:
+                    p = notice.find('p')
+                    if not p:
+                        p = notice
+                    inner_html = str(p)
+                    for tag in dangerous_tags:
+                        if re.search(rf'<{tag}[^>]*>', inner_html, re.IGNORECASE):
+                            findings.append({
+                                'url': url,
+                                'notice_html': inner_html,
+                                'suspicious_tag': tag
+                            })
+                            break
+            except Exception as e:
+                print(f"Error checking admin notices at {url}: {e}")
+        return findings
+
     # Synchronous methods (reflected, stored, DOM, etc.) remain similar to previous version.
     # For brevity, I'll include them but note that they are unchanged from earlier.
     # (I'll put them in a separate code block to keep this response manageable.)
@@ -823,6 +886,15 @@ def main():
         "javascript:alert(1)",
     ]
     test_dom_xss(tester, list(urls), dom_payloads, findings, limit=args.dom_limit)
+    if wp_detected:
+        test_wordpress_notices(
+            target=target,
+            cookies=cookies,
+            findings=findings,
+            delay=args.delay,
+            jitter=args.jitter,
+            proxy=args.proxy,
+        )
 
     phase.update(f"reflected findings={len(findings['reflected'])}", 97)
 
