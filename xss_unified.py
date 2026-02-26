@@ -15,6 +15,7 @@ import concurrent.futures
 import argparse
 import os
 import sys
+import subprocess
 from bs4 import BeautifulSoup
 from collections import deque
 from urllib.parse import urljoin, urlparse
@@ -37,6 +38,7 @@ DEFAULT_CRAWL_DEPTH = 2
 DEFAULT_DOM_URL_LIMIT = 20           # max URLs to test for DOM XSS
 
 PAYLOAD_FILE = "xss_payloads.txt"   # external payload file (optional)
+DEFAULT_GENERATED_PAYLOAD_COUNT = 4000
 
 # Built-in payloads (abbreviated – expand for real use)
 BUILTIN_PAYLOADS = [
@@ -65,6 +67,26 @@ def load_payloads(payload_file):
         with open(payload_file, 'r') as f:
             return [line.strip() for line in f if line.strip()]
     return BUILTIN_PAYLOADS
+
+
+def ensure_payload_file(payload_file, count=DEFAULT_GENERATED_PAYLOAD_COUNT):
+    if os.path.exists(payload_file):
+        return True
+    generator_script = "xss_payload_generator.py"
+    if not os.path.exists(generator_script):
+        return False
+    cmd = [
+        sys.executable,
+        generator_script,
+        "--output",
+        payload_file,
+        "--count",
+        str(count),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return False
+    return os.path.exists(payload_file)
 
 def random_string(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
@@ -364,7 +386,8 @@ def is_wordpress(base_url, session):
 # ===================== MAIN =====================
 def main():
     parser = argparse.ArgumentParser(description="Aggressive Unified XSS Scanner with tunable aggressiveness.")
-    parser.add_argument("target", help="Target URL (e.g., https://example.com)")
+    parser.add_argument("target", nargs="?", help="Target URL (e.g., https://example.com)")
+    parser.add_argument("--target", dest="target_opt", help="Target URL (alternative to positional target)")
     parser.add_argument("--depth", type=int, default=DEFAULT_CRAWL_DEPTH, help="Crawl depth (default: %(default)s)")
     parser.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS, help="Max concurrent threads (default: %(default)s)")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY_BASE, help="Base delay between requests (seconds, 0 = no delay) (default: %(default)s)")
@@ -375,12 +398,16 @@ def main():
     parser.add_argument("--collaborator", help="Blind XSS collaborator URL (e.g., http://your.burpcollaborator.net)")
     parser.add_argument("--cookies", help="Cookies (format: name=value; name2=value2)")
     parser.add_argument("--payload-file", default=PAYLOAD_FILE, help="File containing payloads (one per line)")
+    parser.add_argument("--payload-generate-count", type=int, default=DEFAULT_GENERATED_PAYLOAD_COUNT, help="Auto-generation payload count when payload file is missing")
+    parser.add_argument("--no-auto-generate-payloads", action="store_true", help="Do not auto-generate payload file if missing")
     parser.add_argument("--no-wp", action="store_true", help="Skip WordPress admin notice checks")
     parser.add_argument("--output", help="Save report to file (JSON)")
 
     args = parser.parse_args()
 
-    target = args.target
+    target = args.target_opt or args.target
+    if not target:
+        parser.error("target is required (positional or --target)")
     if not target.startswith('http'):
         target = 'http://' + target
 
@@ -394,6 +421,15 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
     session.cookies.update(cookies)
+
+    if not args.no_auto_generate_payloads and not os.path.exists(args.payload_file):
+        print(f"[*] Payload file not found: {args.payload_file}")
+        print(f"[*] Auto-generating payload file (~{args.payload_generate_count} payloads)...")
+        ok = ensure_payload_file(args.payload_file, args.payload_generate_count)
+        if ok:
+            print(f"[+] Generated payload file: {args.payload_file}")
+        else:
+            print("[!] Failed to auto-generate payload file. Falling back to built-in payload list.")
 
     print("\n[*] Loading payloads...")
     all_payloads = load_payloads(args.payload_file)
