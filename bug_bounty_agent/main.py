@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -38,6 +40,16 @@ BLUE = "\033[38;5;39m"
 MAGENTA = "\033[38;5;201m"
 ORANGE = "\033[38;5;208m"
 DIM = "\033[2m"
+
+
+class BackgroundXSSJob:
+    def __init__(self) -> None:
+        self.thread: threading.Thread | None = None
+        self.running: bool = False
+        self.done: bool = False
+        self.exit_code: int | None = None
+        self.started_at: float = 0.0
+        self.options: dict = {}
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -338,6 +350,7 @@ def _run_xss_unified_scope_step(
     result,
     operator_id: str,
     session_layout: SessionLayout | None,
+    xss_options: Optional[dict] = None,
     session_state: Optional[dict] = None,
 ) -> int:
     script_path = Path("xss_unified.py")
@@ -372,7 +385,17 @@ def _run_xss_unified_scope_step(
     def _on_target(idx: int, total: int, target: str) -> None:
         progress.update(int((idx - 1) / max(1, total) * 100), f"xss scan {idx}/{total}: {target}")
 
-    tool_run = run_xss_scope(result, session_layout, script_path, on_target=_on_target)
+    opts = xss_options or {}
+    tool_run = run_xss_scope(
+        result,
+        session_layout,
+        script_path,
+        use_async_mode=bool(opts.get("use_async_mode", True)),
+        use_headless=bool(opts.get("use_headless", True)),
+        use_waf_evasion=bool(opts.get("use_waf_evasion", False)),
+        html_report=bool(opts.get("html_report", True)),
+        on_target=_on_target,
+    )
     progress.finish("XSS scan complete")
     for target in tool_run.targets:
         if session_state is not None:
@@ -786,6 +809,36 @@ def _render_all_steps(result) -> None:
     _render_step_4(result)
 
 
+def _estimate_xss_minutes(result) -> float:
+    targets, _, _ = collect_xss_targets(result)
+    # Heuristic estimate for default aggressive profile.
+    return max(1.0, round(len(targets) * 0.3, 1))
+
+
+def _prompt_xss_options() -> dict:
+    _print_section("XSS Quick Instructions")
+    _print_table(
+        ["Option", "Flag", "Default"],
+        [
+            ["Headless DOM mode", "--headless", "on"],
+            ["Async mode", "--async-mode", "on"],
+            ["WAF evasion mode", "--waf-evasion", "off"],
+            ["HTML report", "--html-report report.html", "on"],
+        ],
+    )
+    print(_color("[Warning] Use WAF mode only when explicitly authorized by program policy.", YELLOW, bold=True))
+    headless = input(_color("Enable --headless? (Y/n): ", MAGENTA, bold=True)).strip().lower() not in {"n", "no"}
+    async_mode = input(_color("Enable --async-mode? (Y/n): ", MAGENTA, bold=True)).strip().lower() not in {"n", "no"}
+    waf = input(_color("Enable --waf-evasion? (y/N): ", MAGENTA, bold=True)).strip().lower() in {"y", "yes"}
+    html = input(_color("Enable --html-report? (Y/n): ", MAGENTA, bold=True)).strip().lower() not in {"n", "no"}
+    return {
+        "use_headless": headless,
+        "use_async_mode": async_mode,
+        "use_waf_evasion": waf,
+        "html_report": html,
+    }
+
+
 def _resolve_program_inputs(args: argparse.Namespace) -> tuple[str | None, str | None]:
     program_url = args.program_url
     program_hint = args.program_hint
@@ -886,7 +939,36 @@ def main() -> int:
         "artifacts": [],
         "findings": [],
         "session_layout": None,
+        "xss_job": BackgroundXSSJob(),
     }
+
+    def _start_xss_background(local_result, options: dict) -> None:
+        job: BackgroundXSSJob = session_state.get("xss_job")
+        if job.running:
+            print(_color("[Info] XSS background job is already running.", YELLOW, bold=True))
+            return
+
+        job.running = True
+        job.done = False
+        job.exit_code = None
+        job.started_at = time.time()
+        job.options = dict(options)
+
+        def _worker() -> None:
+            rc = _run_xss_unified_scope_step(
+                local_result,
+                args.operator_id,
+                session_layout=session_state.get("session_layout"),
+                xss_options=options,
+                session_state=session_state,
+            )
+            job.exit_code = rc
+            job.running = False
+            job.done = True
+
+        thread = threading.Thread(target=_worker, name="xss-background", daemon=True)
+        job.thread = thread
+        thread.start()
 
     if args.command:
         result, rc = _run_recon_with_session(args, run_recon, session_state)
@@ -994,6 +1076,14 @@ def main() -> int:
     tests_done = False
 
     while True:
+        job: BackgroundXSSJob = session_state.get("xss_job")
+        if job.running:
+            elapsed = int(time.time() - job.started_at)
+            print(_color(f"[XSS Background] running for {elapsed}s. You can continue other tasks.", CYAN, bold=True))
+        elif job.done:
+            status = "success" if job.exit_code == 0 else f"failed (exit {job.exit_code})"
+            print(_color(f"[XSS Background] finished: {status}", GREEN if job.exit_code == 0 else YELLOW, bold=True))
+            job.done = False
         command = input(_color("bug_bounty>> ", ORANGE, bold=True)).strip().lower()
         if not command:
             continue
@@ -1005,6 +1095,12 @@ def main() -> int:
             _show_start_instructions()
             continue
         if command in {"q", "quit", "exit"}:
+            if job.running:
+                confirm = input(_color("XSS scan is still running. Quit and stop it? (y/N): ", MAGENTA, bold=True)).strip().lower()
+                if confirm not in {"y", "yes"}:
+                    print(_color("[Info] Continuing session. XSS scan still running.", CYAN, bold=True))
+                    continue
+                print(_color("[Warning] Background XSS scan will stop when session exits.", YELLOW, bold=True))
             print(_color("[Quit] Session ended.", RED, bold=True))
             break
 
@@ -1061,6 +1157,11 @@ def main() -> int:
                 elif mode_choice in {"s", "suggested"}:
                     _render_suggested_tests_table(result)
                 elif mode_choice in {"x", "xss"}:
+                    job: BackgroundXSSJob = session_state.get("xss_job")
+                    if job.running:
+                        print(_color("[Info] XSS background scan already running.", YELLOW, bold=True))
+                        continue
+
                     core_deps = ensure_runtime_dependencies(
                         include_optional=False,
                         auto_install=not args.no_auto_install_deps,
@@ -1087,11 +1188,21 @@ def main() -> int:
                         )
                     if not optional_deps.ok:
                         print(_color("[Note] Continuing XSS scan without optional DOM browser checks if selenium is unavailable.", YELLOW, bold=True))
+                    xss_options = _prompt_xss_options()
                     _render_step_2(result)
+                    estimate_min = _estimate_xss_minutes(result)
+                    print(_color(f"[Estimate] XSS scan may take ~{estimate_min} minute(s).", CYAN, bold=True))
+                    if estimate_min > 5:
+                        bg = input(_color("Estimated >5 min. Run in background? (Y/n): ", MAGENTA, bold=True)).strip().lower()
+                        if bg not in {"n", "no"}:
+                            _start_xss_background(result, xss_options)
+                            session_state.setdefault("steps", []).append("TESTS started: XSS unified scan running in background.")
+                            continue
                     rc = _run_xss_unified_scope_step(
                         result,
                         args.operator_id,
                         session_layout=session_state.get("session_layout"),
+                        xss_options=xss_options,
                         session_state=session_state,
                     )
                     if rc == 0:

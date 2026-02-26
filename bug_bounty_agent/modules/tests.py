@@ -100,6 +100,10 @@ def run_xss_scope(
     result,
     layout: SessionLayout,
     script_path: Path,
+    use_async_mode: bool = True,
+    use_headless: bool = True,
+    use_waf_evasion: bool = False,
+    html_report: bool = True,
     on_target: Optional[Callable[[int, int, str], None]] = None,
 ) -> ToolRunResult:
     ensure_layout(layout)
@@ -138,13 +142,17 @@ def run_xss_scope(
                 target,
                 "--depth",
                 "1",
-                "--async-mode",
-                "--headless",
-                "--html-report",
-                str(tmp_html),
                 "--output",
                 str(tmp_output),
             ]
+            if use_async_mode:
+                cmd.append("--async-mode")
+            if use_headless:
+                cmd.append("--headless")
+            if use_waf_evasion:
+                cmd.append("--waf-evasion")
+            if html_report:
+                cmd.extend(["--html-report", str(tmp_html)])
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
             target_data: dict = {}
             if tmp_output.exists():

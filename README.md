@@ -63,6 +63,12 @@ afrog
 back
 ```
 
+When starting `xss` from the agent, you now get:
+- quick XSS option prompts (`--headless`, `--async-mode`, `--waf-evasion`, `--html-report`)
+- runtime estimate
+- optional background run when estimate is high
+- running-status notifications in the main prompt
+
 Inside REPORTING console (`bug_bounty/report>>`):
 
 ```bash
