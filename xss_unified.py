@@ -548,6 +548,81 @@ def dedupe_findings(findings):
             findings[k] = dedupe_finding_list(v)
     return findings
 
+def ask_yes_no(prompt, default=True):
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    while True:
+        ans = input(prompt + suffix).strip().lower()
+        if not ans:
+            return default
+        if ans in ("y", "yes"):
+            return True
+        if ans in ("n", "no"):
+            return False
+        print("Please answer yes or no.")
+
+def apply_scan_profile(args, profile):
+    p = (profile or "balanced").lower()
+    if p == "balanced":
+        return
+    if p == "aggressive":
+        args.async_mode = True
+        args.workers = max(args.workers, 60)
+        args.delay = min(args.delay, 0.02)
+        args.jitter = min(args.jitter, 0.01)
+        args.payload_limit = max(args.payload_limit, 2000)
+        args.dom_limit = max(args.dom_limit, 200)
+        return
+    if p == "ultra":
+        args.async_mode = True
+        args.workers = max(args.workers, 120)
+        args.delay = 0.0
+        args.jitter = 0.0
+        args.payload_limit = max(args.payload_limit, 4000)
+        args.dom_limit = max(args.dom_limit, 1000)
+        return
+
+def interactive_v2_confirm(args):
+    """V2-style confirmation: confirm modules + aggressiveness before scan."""
+    if args.non_interactive or not sys.stdin.isatty():
+        return
+
+    print("\n=== V2 Scan Confirmation ===")
+    use_all = ask_yes_no("Run all major modules (waf, reflected, forms, stored, blind, dom, wp)?", default=True)
+    if use_all:
+        args.no_waf = False
+        args.no_reflected = False
+        args.no_forms = False
+        args.no_stored = False
+        args.no_blind = False
+        args.no_dom = False
+        args.no_wp = False
+    else:
+        args.no_waf = not ask_yes_no("Run WAF fingerprint check?", default=True)
+        args.no_reflected = not ask_yes_no("Run reflected URL/param scan?", default=True)
+        args.no_forms = not ask_yes_no("Run reflected form scan?", default=True)
+        args.no_stored = not ask_yes_no("Run stored XSS scan?", default=True)
+        args.no_blind = not ask_yes_no("Run blind XSS injection?", default=bool(args.collaborator))
+        args.no_dom = not ask_yes_no("Run DOM XSS scan?", default=args.headless)
+        args.no_wp = not ask_yes_no("Run WordPress admin notice scan?", default=True)
+
+    print("\nAggressiveness profile:")
+    print("  1) balanced")
+    print("  2) aggressive")
+    print("  3) ultra")
+    print("  4) custom (keep current CLI values)")
+    choice = input("Select profile [1-4] (default 1): ").strip()
+    profile_map = {"1": "balanced", "2": "aggressive", "3": "ultra", "4": "custom"}
+    profile = profile_map.get(choice, "balanced")
+    if profile != "custom":
+        apply_scan_profile(args, profile)
+
+    print("\nSelected config:")
+    print(f"  waf={not args.no_waf}, reflected={not args.no_reflected}, forms={not args.no_forms}, stored={not args.no_stored}, blind={not args.no_blind}, dom={not args.no_dom}, wp={not args.no_wp}")
+    print(f"  profile={profile}, workers={args.workers}, delay={args.delay}, jitter={args.jitter}, payload_limit={args.payload_limit}, dom_limit={args.dom_limit}, async={args.async_mode}")
+    if not ask_yes_no("Proceed with scan?", default=True):
+        print("Scan cancelled by user.")
+        sys.exit(0)
+
 def random_string(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
@@ -1069,7 +1144,14 @@ ________________________________________________________________________________
     parser.add_argument("--proxy", help="Proxy URL (e.g., http://127.0.0.1:8080)")
     parser.add_argument("--async-mode", action="store_true", help="Use asyncio for high concurrency")
     parser.add_argument("--ml", action="store_true", help="Enable machine learning payload selection")
+    parser.add_argument("--no-waf", action="store_true", help="Skip WAF fingerprinting check")
     parser.add_argument("--no-wp", action="store_true", help="Skip WordPress admin notice checks")
+    parser.add_argument("--no-reflected", action="store_true", help="Skip reflected URL/param scan")
+    parser.add_argument("--no-forms", action="store_true", help="Skip reflected form scan")
+    parser.add_argument("--no-stored", action="store_true", help="Skip stored XSS scan")
+    parser.add_argument("--no-blind", action="store_true", help="Skip blind XSS injection")
+    parser.add_argument("--no-dom", action="store_true", help="Skip DOM XSS scan")
+    parser.add_argument("--non-interactive", action="store_true", help="Disable V2 interactive confirmation prompts")
     parser.add_argument("--scope-file", help="Path to scope file with +include / -exclude regex lines")
     parser.add_argument("--in-scope", action="append", default=[], help="Regex URL include rule (can be repeated)")
     parser.add_argument("--out-of-scope", action="append", default=[], help="Regex URL exclude rule (can be repeated)")
@@ -1096,6 +1178,9 @@ ________________________________________________________________________________
     if not target.startswith('http'):
         target = 'http://' + target
 
+    # V2-style interactive confirmation before heavy scan work.
+    interactive_v2_confirm(args)
+
     file_in_scope, file_out_scope = load_scope_file(args.scope_file)
     merged_in_scope = list(args.in_scope) + file_in_scope
     merged_out_scope = list(args.out_of_scope) + file_out_scope
@@ -1121,14 +1206,20 @@ ________________________________________________________________________________
     if args.proxy:
         session.proxies.update({'http': args.proxy, 'https': args.proxy})
 
+    run_waf = not args.no_waf
+
     # 1. WAF fingerprinting
-    print("[*] Fingerprinting WAF...")
-    detector = WAFDetector(session)
-    waf_name = detector.fingerprint(target)
-    if waf_name:
-        print(f"[+] Detected WAF: {waf_name}")
+    waf_name = None
+    if run_waf:
+        print("[*] Fingerprinting WAF...")
+        detector = WAFDetector(session)
+        waf_name = detector.fingerprint(target)
+        if waf_name:
+            print(f"[+] Detected WAF: {waf_name}")
+        else:
+            print("[-] No WAF detected or unknown.")
     else:
-        print("[-] No WAF detected or unknown.")
+        print("[*] Skipping WAF fingerprinting.")
 
     # 2. Load payloads
     base_payloads = []
@@ -1153,6 +1244,13 @@ ________________________________________________________________________________
 
     # 4. Detect WordPress
     wp_detected = not args.no_wp and is_wordpress(target, session)
+
+    run_reflected = not args.no_reflected
+    run_forms = not args.no_forms
+    run_stored = not args.no_stored
+    run_blind = not args.no_blind
+    run_dom = not args.no_dom
+    run_wp = not args.no_wp
 
     # 5. Create tester
     tester = XSSTester(
@@ -1209,8 +1307,9 @@ ________________________________________________________________________________
     }
 
     # --- Reflected URL/param testing ---
-    print("\n[*] Testing reflected XSS in URL parameters...")
-    if args.async_mode:
+    if run_reflected:
+        print("\n[*] Testing reflected XSS in URL parameters...")
+    if run_reflected and args.async_mode:
         async def run_reflected_async():
             connector = aiohttp.TCPConnector(limit=max(1, args.workers))
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT + 5)
@@ -1245,7 +1344,7 @@ ________________________________________________________________________________
         findings['reflected'].extend(async_results)
         for r in async_results:
             print(f"  [!] Reflected: {r['url']}")
-    else:
+    elif run_reflected:
         for url, params in url_params.items():
             for param in params:
                 if not scope.is_in_scope(url):
@@ -1255,63 +1354,75 @@ ________________________________________________________________________________
                     findings['reflected'].extend(res)
                     for r in res:
                         print(f"  [!] Reflected: {r['url']}")
+    else:
+        print("\n[*] Skipping reflected URL/param scan.")
 
     # --- Reflected form testing ---
-    print("\n[*] Testing reflected XSS in forms...")
-    for form in forms:
-        res = tester.test_reflected_form(form, base_payloads)
-        if res:
-            findings['reflected'].extend(res)
-            for r in res:
-                print(f"  [!] Reflected via form: {r['url']}")
+    if run_forms:
+        print("\n[*] Testing reflected XSS in forms...")
+        for form in forms:
+            res = tester.test_reflected_form(form, base_payloads)
+            if res:
+                findings['reflected'].extend(res)
+                for r in res:
+                    print(f"  [!] Reflected via form: {r['url']}")
+    else:
+        print("\n[*] Skipping reflected form scan.")
 
     # --- Stored XSS testing ---
-    print("\n[*] Testing stored XSS...")
-    stored_markers = []
-    storage_forms = [f for f in forms if is_storage_candidate(f)]
-    for form in storage_forms:
-        marker = f"STORED-XSS-{random_string(8)}"
-        stored_markers.append((marker, form))
-        if tester.inject_stored_payload(form, marker):
-            print(f"  [*] Injected marker into form at {form['original_url']}")
-        if args.delay > 0:
-            time.sleep(args.delay)
+    if run_stored:
+        print("\n[*] Testing stored XSS...")
+        stored_markers = []
+        storage_forms = [f for f in forms if is_storage_candidate(f)]
+        for form in storage_forms:
+            marker = f"STORED-XSS-{random_string(8)}"
+            stored_markers.append((marker, form))
+            if tester.inject_stored_payload(form, marker):
+                print(f"  [*] Injected marker into form at {form['original_url']}")
+            if args.delay > 0:
+                time.sleep(args.delay)
 
-    if stored_markers:
-        print("[*] Re-checking for stored payloads (multi-pass)...")
-        verification_urls = set(urls)
-        verification_urls.add(target)
-        for _, form in stored_markers:
-            verification_urls.add(form.get('original_url', target))
-            verification_urls.add(urljoin(form.get('original_url', target), form.get('action') or ''))
-        likely_paths = ['/', '/blog', '/posts', '/comments', '/profile', '/wp-admin/']
-        for p in likely_paths:
-            verification_urls.add(urljoin(target, p))
+        if stored_markers:
+            print("[*] Re-checking for stored payloads (multi-pass)...")
+            verification_urls = set(urls)
+            verification_urls.add(target)
+            for _, form in stored_markers:
+                verification_urls.add(form.get('original_url', target))
+                verification_urls.add(urljoin(form.get('original_url', target), form.get('action') or ''))
+            likely_paths = ['/', '/blog', '/posts', '/comments', '/profile', '/wp-admin/']
+            for p in likely_paths:
+                verification_urls.add(urljoin(target, p))
 
-        verification_urls = [u for u in verification_urls if scope.is_in_scope(u)]
-        for pass_no in [1, 2]:
-            if pass_no == 2:
-                time.sleep(max(args.delay, 0.5))
-            for marker, form in stored_markers:
-                found_urls = tester.check_stored_payload(verification_urls, marker)
-                if found_urls:
-                    print(f"  [!] Stored XSS marker '{marker}' found at: {found_urls}")
-                    findings['stored'].append({
-                        'marker': marker,
-                        'injected_via': form['original_url'],
-                        'found_at': found_urls,
-                        'verification_pass': pass_no
-                    })
+            verification_urls = [u for u in verification_urls if scope.is_in_scope(u)]
+            for pass_no in [1, 2]:
+                if pass_no == 2:
+                    time.sleep(max(args.delay, 0.5))
+                for marker, form in stored_markers:
+                    found_urls = tester.check_stored_payload(verification_urls, marker)
+                    if found_urls:
+                        print(f"  [!] Stored XSS marker '{marker}' found at: {found_urls}")
+                        findings['stored'].append({
+                            'marker': marker,
+                            'injected_via': form['original_url'],
+                            'found_at': found_urls,
+                            'verification_pass': pass_no
+                        })
+        else:
+            print("[*] No suitable forms for stored XSS injection.")
     else:
-        print("[*] No suitable forms for stored XSS injection.")
+        print("\n[*] Skipping stored XSS scan.")
 
     # --- Blind XSS ---
-    if args.collaborator:
+    if run_blind and args.collaborator:
         print("\n[*] Injecting blind XSS payloads...")
         tester.inject_blind_payloads(forms, url_params)
+    elif run_blind and not args.collaborator:
+        print("\n[*] Blind XSS enabled but no collaborator provided; skipping.")
+    else:
+        print("\n[*] Skipping blind XSS injection.")
 
     # --- DOM XSS ---
-    if args.headless and SELENIUM_AVAILABLE:
+    if run_dom and args.headless and SELENIUM_AVAILABLE:
         print("\n[*] Testing DOM XSS...")
         dom_payloads = [
             "<img src=x onerror=alert('XSS')>",
@@ -1337,11 +1448,13 @@ ________________________________________________________________________________
                 if tester.test_dom(test_url, payload):
                     print(f"  [!] DOM XSS (fragment) at {test_url}")
                     findings['dom'].append({'url': test_url, 'type': 'fragment', 'payload': payload})
-    else:
+    elif run_dom:
         print("[*] DOM XSS testing skipped (use --headless to enable).")
+    else:
+        print("[*] Skipping DOM XSS scan.")
 
     # --- WordPress admin notices ---
-    if wp_detected:
+    if run_wp and wp_detected:
         print("\n[*] Crawling WordPress admin area for admin notice XSS...")
         admin_crawler = Crawler(target, max_depth=1, cookies=cookies,
                                 path_filter=lambda u: '/wp-admin/' in u,
@@ -1360,6 +1473,10 @@ ________________________________________________________________________________
                 print("[*] No unescaped admin notices detected.")
         else:
             print("[*] No admin URLs crawled (maybe authentication required).")
+    elif run_wp:
+        print("\n[*] WordPress not detected; skipping admin notice scan.")
+    else:
+        print("\n[*] Skipping WordPress admin notice scan.")
 
     tester.close()
 
