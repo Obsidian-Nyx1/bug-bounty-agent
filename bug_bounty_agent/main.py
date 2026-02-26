@@ -192,18 +192,13 @@ def _show_reporting_menu() -> None:
 
 def _show_start_instructions() -> None:
     _print_section("Quick Instructions")
-    print(_color("Structured flow: RECON -> TESTS -> REPORTING", GREEN, bold=True))
+    print(_color("Choose one usage mode:", CYAN, bold=True))
     _print_table(
-        ["Step", "Command / Action"],
+        ["Mode", "How to Use"],
         [
-            ["1", "Start guided workflow: ./bug_bounty"],
-            ["2", "Paste HackerOne program URL when prompted"],
-            ["3", "Use menu: 1 RECON, 2 TESTS, 3 REPORTING, q quit"],
-            ["4", "Subcommand RECON: ./bug_bounty recon"],
-            ["5", "Subcommand TEST XSS: ./bug_bounty test --tool xss"],
-            ["6", "Subcommand TEST AFROG: ./bug_bounty test --tool afrog"],
-            ["7", "Subcommand REPORT: ./bug_bounty report"],
-            ["8", "Subcommand RUN-ALL: ./bug_bounty run-all"],
+            ["Interactive", "./bug_bounty  -> menu flow (RECON -> TESTS -> REPORTING)"],
+            ["CLI Subcommands", "./bug_bounty recon | test --tool xss | test --tool afrog | report | run-all"],
+            ["Full Help", "./bug_bounty --help"],
         ],
     )
     _print_table(
@@ -214,6 +209,20 @@ def _show_start_instructions() -> None:
             ["Operator", "Use --operator-id to keep your learning/checkpoint profile stable."],
         ],
     )
+
+
+def _startup_mode_prompt() -> str:
+    _print_section("Startup Mode")
+    _print_table(
+        ["Input", "Action"],
+        [
+            ["i", "Interactive menu workflow"],
+            ["c", "Show CLI command examples and exit"],
+            ["h", "Show full help and exit"],
+            ["q", "Quit"],
+        ],
+    )
+    return input(_color("Choose startup mode (i/c/h/q): ", MAGENTA, bold=True)).strip().lower()
 
 
 class _ProgressBar:
@@ -789,8 +798,23 @@ def main() -> int:
     args = parse_args()
     print(render_banner())
     print(_color("\n[Status] Starting ./bug_bounty", GREEN, bold=True))
-    print(_color("Interactive mode ready.", CYAN))
-    _show_start_instructions()
+    print(_color("Ready.", CYAN))
+
+    # Only show startup chooser on plain invocation (no subcommand, no direct flags).
+    direct_mode = bool(args.command or args.non_interactive_output or args.run_xss_unified)
+    if not direct_mode:
+        choice = _startup_mode_prompt()
+        if choice == "c":
+            _show_start_instructions()
+            return 0
+        if choice == "h":
+            print(_color("Run: ./bug_bounty --help", CYAN, bold=True))
+            return 0
+        if choice == "q":
+            print(_color("[Quit] Session ended.", RED, bold=True))
+            return 0
+        # default to interactive menu when input is empty/unknown/i
+        print(_color("Interactive mode selected.", CYAN, bold=True))
 
     deps = ensure_runtime_dependencies(
         include_optional=False,
