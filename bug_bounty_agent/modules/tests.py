@@ -130,6 +130,7 @@ def run_xss_scope(
             if on_target:
                 on_target(idx, len(targets), target)
             tmp_output = Path(tmpdir) / f"target_{idx}.json"
+            tmp_html = Path(tmpdir) / f"target_{idx}.html"
             cmd = [
                 sys.executable,
                 str(script_path),
@@ -137,6 +138,10 @@ def run_xss_scope(
                 target,
                 "--depth",
                 "1",
+                "--async-mode",
+                "--headless",
+                "--html-report",
+                str(tmp_html),
                 "--output",
                 str(tmp_output),
             ]

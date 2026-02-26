@@ -157,10 +157,23 @@ export GITHUB_MODELS_MAX_MODELS=5
 
 `xss_unified.py` supports both interactive and non-interactive modes.
 
+When it starts, it prints a quick instructions panel with all major options.
+
 Non-interactive example:
 
 ```bash
 python3 xss_unified.py --target https://example.com --depth 1 --output xss_report.json
+```
+
+Example with additional controls:
+
+```bash
+python3 xss_unified.py https://example.com \
+  --headless \
+  --async-mode \
+  --waf-evasion \
+  --html-report report.html \
+  --output report.json
 ```
 
 Features:
@@ -168,6 +181,8 @@ Features:
 - Reflected/stored/DOM XSS probes.
 - WordPress detection (`/wp-admin/`, `/wp-content/`, `/wp-includes/`, `/wp-login.php`).
 - WordPress admin notice checks in `/wp-admin/` pages for risky HTML patterns.
+- Runtime knobs for depth/workers/delay/jitter/payload limits.
+- Optional startup instructions toggle: `--no-instructions`.
 
 ## Output
 

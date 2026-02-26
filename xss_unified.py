@@ -89,6 +89,38 @@ class LiveBar:
         sys.stdout.write("\n")
         sys.stdout.flush()
 
+
+def show_quick_instructions() -> None:
+    print("\n" + "=" * 92)
+    print("XSS_UNIFIED QUICK INSTRUCTIONS")
+    print("=" * 92)
+    print("Target:")
+    print("  positional      : python3 xss_unified.py https://example.com")
+    print("  optional flag   : python3 xss_unified.py --target https://example.com")
+    print("")
+    print("Core knobs:")
+    print("  --depth N           Crawl depth")
+    print("  --workers N         Concurrency level")
+    print("  --delay N           Base delay between requests (seconds)")
+    print("  --jitter N          Random delay jitter")
+    print("  --payload-limit N   Max payloads per injection point (0 = unlimited)")
+    print("  --dom-limit N       Max URLs for DOM tests (0 = unlimited)")
+    print("")
+    print("Feature toggles:")
+    print("  --headless          Enable DOM browser tests (selenium required)")
+    print("  --async-mode        Enable async crawling/testing mode")
+    print("  --waf-evasion       Enable WAF detection + evasion transforms")
+    print("  --proxy URL         Route traffic through proxy")
+    print("  --collaborator URL  Blind XSS callback endpoint")
+    print("  --no-wp             Skip WordPress-specific checks")
+    print("")
+    print("Payload / reports:")
+    print("  --gen-payloads N    Generate payload file")
+    print("  --payload-file FILE Load payloads from file")
+    print("  --output FILE       Save JSON report")
+    print("  --html-report FILE  Save HTML report")
+    print("=" * 92)
+
 # ----------------------------------------------------------------------
 # Payload generator
 # ----------------------------------------------------------------------
@@ -446,7 +478,11 @@ def main():
     parser.add_argument("--async-mode", action="store_true", help="Use asyncio/aiohttp for high concurrency")
     parser.add_argument("--waf-evasion", action="store_true", help="Enable WAF detection & adaptive evasion")
     parser.add_argument("--no-wp", action="store_true", help="Skip WordPress admin notice checks")
+    parser.add_argument("--no-instructions", action="store_true", help="Hide startup quick instructions block")
     args = parser.parse_args()
+
+    if not args.no_instructions:
+        show_quick_instructions()
 
     phase = LiveBar("Phase")
 
