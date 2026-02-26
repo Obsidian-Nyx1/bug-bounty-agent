@@ -71,10 +71,10 @@ def load_payloads(payload_file):
 
 def ensure_payload_file(payload_file, count=DEFAULT_GENERATED_PAYLOAD_COUNT):
     if os.path.exists(payload_file):
-        return True
+        return True, "Payload file already exists."
     generator_script = "xss_payload_generator.py"
     if not os.path.exists(generator_script):
-        return False
+        return False, f"Generator script not found: {generator_script}"
     cmd = [
         sys.executable,
         generator_script,
@@ -85,8 +85,11 @@ def ensure_payload_file(payload_file, count=DEFAULT_GENERATED_PAYLOAD_COUNT):
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        return False
-    return os.path.exists(payload_file)
+        err = (proc.stderr or proc.stdout or "unknown generator error").strip()
+        return False, f"Generator exited with code {proc.returncode}: {err[:400]}"
+    if not os.path.exists(payload_file):
+        return False, "Generator ran but payload file was not created."
+    return True, f"Generated payload file: {payload_file}"
 
 def random_string(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
@@ -425,11 +428,12 @@ def main():
     if not args.no_auto_generate_payloads and not os.path.exists(args.payload_file):
         print(f"[*] Payload file not found: {args.payload_file}")
         print(f"[*] Auto-generating payload file (~{args.payload_generate_count} payloads)...")
-        ok = ensure_payload_file(args.payload_file, args.payload_generate_count)
+        ok, reason = ensure_payload_file(args.payload_file, args.payload_generate_count)
         if ok:
-            print(f"[+] Generated payload file: {args.payload_file}")
+            print(f"[+] {reason}")
         else:
-            print("[!] Failed to auto-generate payload file. Falling back to built-in payload list.")
+            print(f"[!] Failed to auto-generate payload file: {reason}")
+            print("[!] Falling back to built-in payload list.")
 
     print("\n[*] Loading payloads...")
     all_payloads = load_payloads(args.payload_file)
