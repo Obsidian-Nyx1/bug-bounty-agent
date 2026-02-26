@@ -91,6 +91,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable automatic runtime dependency installation.",
     )
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("recon", help="Run RECON: URL intake + scope discovery.")
+    test_parser = subparsers.add_parser("test", help="Run TESTS module.")
+    test_parser.add_argument(
+        "--tool",
+        choices=["xss", "afrog"],
+        required=True,
+        help="Testing tool to run.",
+    )
+    subparsers.add_parser("report", help="Run REPORTING module and compile session report.")
+    subparsers.add_parser("run-all", help="Run RECON, TESTS (xss+afrog), then REPORTING.")
     return parser.parse_args()
 
 
@@ -188,8 +199,11 @@ def _show_start_instructions() -> None:
             ["1", "Start guided workflow: ./bug_bounty"],
             ["2", "Paste HackerOne program URL when prompted"],
             ["3", "Use menu: 1 RECON, 2 TESTS, 3 REPORTING, q quit"],
-            ["4", "Run automated checks: ./bug_bounty --run-automated test"],
-            ["5", "Run scope-aware XSS step: ./bug_bounty --xss_unified.py"],
+            ["4", "Subcommand RECON: ./bug_bounty recon"],
+            ["5", "Subcommand TEST XSS: ./bug_bounty test --tool xss"],
+            ["6", "Subcommand TEST AFROG: ./bug_bounty test --tool afrog"],
+            ["7", "Subcommand REPORT: ./bug_bounty report"],
+            ["8", "Subcommand RUN-ALL: ./bug_bounty run-all"],
         ],
     )
     _print_table(
@@ -732,6 +746,45 @@ def _render_all_steps(result) -> None:
     _render_step_4(result)
 
 
+def _resolve_program_inputs(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    program_url = args.program_url
+    program_hint = args.program_hint
+    if not program_url and not args.no_prompt:
+        program_url = input("[Input] Paste project URL: ").strip()
+    if (
+        program_url
+        and "hackerone.com/opportunities" in program_url
+        and not program_hint
+        and not args.no_prompt
+    ):
+        program_hint = input(
+            "[Input] Paste project handle/title from upper-left program header: "
+        ).strip()
+    return program_url, program_hint
+
+
+def _run_recon_with_session(
+    args: argparse.Namespace,
+    run_recon_fn,
+    session_state: dict,
+) -> tuple[object | None, int]:
+    program_url, program_hint = _resolve_program_inputs(args)
+    if not program_url:
+        print(_color("RECON needs a program URL.", RED, bold=True))
+        return None, 1
+
+    result = run_recon_fn(program_url, program_hint)
+    layout = build_session_layout(args.operator_id, program_url)
+    profile_path = persist_recon_profile(layout, result, program_url, program_hint)
+    session_state["program_url"] = program_url
+    session_state["recon_done"] = True
+    session_state["session_layout"] = layout
+    session_state.setdefault("artifacts", []).append(profile_path)
+    session_state.setdefault("steps", []).append(f"Session initialized: {layout.session_id}")
+    session_state.setdefault("steps", []).append(f"RECON profile saved: {profile_path}")
+    return result, 0
+
+
 def main() -> int:
     args = parse_args()
     print(render_banner())
@@ -794,6 +847,72 @@ def main() -> int:
         "findings": [],
         "session_layout": None,
     }
+
+    if args.command:
+        result, rc = _run_recon_with_session(args, run_recon, session_state)
+        if rc != 0 or result is None:
+            return 1
+
+        if args.command == "recon":
+            _render_recon(result)
+            return 0
+
+        if args.command == "test":
+            if args.tool == "xss":
+                core_deps = ensure_runtime_dependencies(
+                    include_optional=False,
+                    auto_install=not args.no_auto_install_deps,
+                )
+                if not core_deps.ok:
+                    print(_color("[Error] XSS core dependencies unavailable.", RED, bold=True))
+                    return 1
+                rc = _run_xss_unified_scope_step(
+                    result,
+                    args.operator_id,
+                    session_layout=session_state.get("session_layout"),
+                    session_state=session_state,
+                )
+                return 0 if rc == 0 else 1
+            rc = _run_afrog_safe_step(
+                result,
+                args.operator_id,
+                session_layout=session_state.get("session_layout"),
+                session_state=session_state,
+            )
+            return 0 if rc == 0 else 1
+
+        if args.command == "report":
+            out = _generate_automatic_report(
+                result,
+                args.operator_id,
+                session_state,
+                session_layout=session_state.get("session_layout"),
+            )
+            print(_color(f"[Auto Report] {out}", GREEN, bold=True))
+            return 0
+
+        if args.command == "run-all":
+            _render_recon(result)
+            xss_rc = _run_xss_unified_scope_step(
+                result,
+                args.operator_id,
+                session_layout=session_state.get("session_layout"),
+                session_state=session_state,
+            )
+            afrog_rc = _run_afrog_safe_step(
+                result,
+                args.operator_id,
+                session_layout=session_state.get("session_layout"),
+                session_state=session_state,
+            )
+            out = _generate_automatic_report(
+                result,
+                args.operator_id,
+                session_state,
+                session_layout=session_state.get("session_layout"),
+            )
+            print(_color(f"[Auto Report] {out}", GREEN, bold=True))
+            return 0 if (xss_rc == 0 and afrog_rc == 0) else 1
 
     # Non-interactive / direct-command modes run intake immediately.
     if args.non_interactive_output or args.run_xss_unified:
