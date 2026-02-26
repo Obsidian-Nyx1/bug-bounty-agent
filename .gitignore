@@ -4,6 +4,7 @@ __pycache__/
 
 # Agent runtime state
 .bug_bounty_agent/
+reports/
 
 # Local environment files
 .env
