@@ -429,6 +429,35 @@ def test_reflected_forms(tester, forms, payloads, findings):
                 print(f"  [!] Reflected via form: {r['url']}")
     return findings
 
+
+def test_stored_xss(tester, forms, urls, findings, delay=0):
+    """Inject unique markers into forms, then re-crawl to detect stored XSS."""
+    print("[*] Testing stored XSS...")
+    stored_markers = []
+    for form in forms:
+        if form['method'] == 'post' and any(inp['type'] == 'text' for inp in form['inputs']):
+            marker = f"STORED-XSS-{random_string(8)}"
+            stored_markers.append((marker, form))
+            if tester.inject_stored_payload(form, marker):
+                print(f"  [*] Injected marker into form at {form['original_url']}")
+            if delay > 0:
+                time.sleep(delay)
+
+    if stored_markers:
+        print("[*] Re-crawling to detect stored payloads...")
+        for marker, form in stored_markers:
+            found_urls = tester.check_stored_payload(urls, marker)
+            if found_urls:
+                print(f"  [!] Stored XSS marker '{marker}' found at: {found_urls}")
+                findings['stored'].append({
+                    'marker': marker,
+                    'injected_via': form['original_url'],
+                    'found_at': found_urls
+                })
+    else:
+        print("[*] No suitable forms for stored XSS injection.")
+    return findings
+
 # ----------------------------------------------------------------------
 # XSS Tester (supports async for reflected)
 # ----------------------------------------------------------------------
@@ -551,6 +580,39 @@ class XSSTester:
             if self.delay > 0:
                 time.sleep(self.delay + random.uniform(0, self.jitter))
         return findings
+
+    def inject_stored_payload(self, form, payload):
+        action = urljoin(form.get('original_url', ''), form.get('action') or '')
+        method = (form.get('method') or 'get').lower()
+        data = {}
+        for inp in form.get('inputs', []):
+            if inp.get('type') in ['submit', 'button', 'image']:
+                continue
+            name = inp.get('name')
+            if not name:
+                continue
+            data[name] = payload if inp.get('type', 'text') == 'text' else inp.get('value', '')
+        if not data:
+            return False
+        try:
+            if method == 'post':
+                self.session.post(action, data=data, timeout=REQUEST_TIMEOUT)
+            else:
+                self.session.get(action, params=data, timeout=REQUEST_TIMEOUT)
+            return True
+        except Exception:
+            return False
+
+    def check_stored_payload(self, urls, payload):
+        found = []
+        for url in urls:
+            try:
+                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+                if payload in resp.text:
+                    found.append(url)
+            except Exception:
+                continue
+        return found
 
     # Synchronous methods (reflected, stored, DOM, etc.) remain similar to previous version.
     # For brevity, I'll include them but note that they are unchanged from earlier.
@@ -698,6 +760,7 @@ def main():
     else:
         test_reflected_params(tester, url_params, all_payloads, findings)
     test_reflected_forms(tester, forms, all_payloads, findings)
+    test_stored_xss(tester, forms, urls, findings, delay=args.delay)
 
     phase.update(f"reflected findings={len(findings['reflected'])}", 97)
 
