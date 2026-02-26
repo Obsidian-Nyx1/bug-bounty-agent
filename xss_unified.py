@@ -61,6 +61,64 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 HEADERS = {'User-Agent': USER_AGENT}
 REQUEST_TIMEOUT = 10
 
+class ScopeManager:
+    """Centralized scope evaluation for URLs."""
+    def __init__(self, target_url, include_subdomains=True, in_scope=None, out_scope=None):
+        self.target_url = target_url
+        parsed = urlparse(target_url)
+        self.target_host = (parsed.hostname or "").lower()
+        self.target_port = parsed.port
+        self.target_scheme = parsed.scheme
+        self.include_subdomains = include_subdomains
+        self.in_scope_patterns = [re.compile(p, re.I) for p in (in_scope or [])]
+        self.out_scope_patterns = [re.compile(p, re.I) for p in (out_scope or [])]
+
+    def _host_in_scope(self, host):
+        host = (host or "").lower()
+        if host == self.target_host:
+            return True
+        if self.include_subdomains and host.endswith("." + self.target_host):
+            return True
+        return False
+
+    def is_in_scope(self, url):
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            # First: baseline host scope
+            if not self._host_in_scope(host):
+                return False
+            # Then explicit allow patterns (if provided)
+            if self.in_scope_patterns and not any(p.search(url) for p in self.in_scope_patterns):
+                return False
+            # Finally explicit deny patterns
+            if any(p.search(url) for p in self.out_scope_patterns):
+                return False
+            return True
+        except Exception:
+            return False
+
+def load_scope_file(path):
+    """Load allow/deny regex patterns from a scope file.
+    Format:
+      + regex
+      - regex
+    """
+    in_scope = []
+    out_scope = []
+    if not path or not os.path.exists(path):
+        return in_scope, out_scope
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("+"):
+                in_scope.append(line[1:].strip())
+            elif line.startswith("-"):
+                out_scope.append(line[1:].strip())
+    return in_scope, out_scope
+
 # ----------------------------------------------------------------------
 # 1. ADVANCED WAF FINGERPRINTING DATABASE
 # ----------------------------------------------------------------------
@@ -329,12 +387,13 @@ class PayloadScorer:
 # 8. CRAWLER (SYNC/ASYNC)
 # ----------------------------------------------------------------------
 class Crawler:
-    def __init__(self, start_url, max_depth, cookies=None, path_filter=None, delay=0, jitter=0, proxy=None):
+    def __init__(self, start_url, max_depth, cookies=None, path_filter=None, delay=0, jitter=0, proxy=None, scope_checker=None):
         self.start_url = start_url
         self.base_domain = urlparse(start_url).netloc
         self.max_depth = max_depth
         self.cookies = cookies or {}
         self.path_filter = path_filter
+        self.scope_checker = scope_checker
         self.delay = delay
         self.jitter = jitter
         self.proxy = proxy
@@ -372,6 +431,8 @@ class Crawler:
                 continue
             if self.path_filter and not self.path_filter(url):
                 continue
+            if self.scope_checker and not self.scope_checker(url):
+                continue
             self.visited.add(url)
             print(f"[Crawl] Depth {depth}: {url}")
 
@@ -380,7 +441,7 @@ class Crawler:
                 all_urls.add(url)
                 forms = extract_forms(url, html)
                 all_forms.extend(forms)
-                links = get_links(url, html, self.base_domain)
+                links = get_links(url, html, self.base_domain, scope_checker=self.scope_checker)
                 for link in links:
                     if link not in self.visited:
                         self.urls_to_visit.append((link, depth+1))
@@ -398,6 +459,8 @@ class Crawler:
                 continue
             if self.path_filter and not self.path_filter(url):
                 continue
+            if self.scope_checker and not self.scope_checker(url):
+                continue
             self.visited.add(url)
             print(f"[Crawl] Depth {depth}: {url}")
 
@@ -406,7 +469,7 @@ class Crawler:
                 all_urls.add(url)
                 forms = extract_forms(url, html)
                 all_forms.extend(forms)
-                links = get_links(url, html, self.base_domain)
+                links = get_links(url, html, self.base_domain, scope_checker=self.scope_checker)
                 for link in links:
                     if link not in self.visited:
                         self.urls_to_visit.append((link, depth+1))
@@ -434,13 +497,16 @@ def extract_forms(url, html):
         forms.append({'action':action, 'method':method, 'inputs':inputs, 'original_url':url})
     return forms
 
-def get_links(url, html, base_domain):
+def get_links(url, html, base_domain, scope_checker=None):
     soup = BeautifulSoup(html, 'html.parser')
     links = set()
     for a in soup.find_all('a', href=True):
         href = a['href']
         full = urljoin(url, href)
-        if urlparse(full).netloc == base_domain:
+        if scope_checker:
+            if scope_checker(full):
+                links.add(full)
+        elif urlparse(full).netloc == base_domain:
             links.add(full)
     return links
 
@@ -1004,6 +1070,10 @@ ________________________________________________________________________________
     parser.add_argument("--async-mode", action="store_true", help="Use asyncio for high concurrency")
     parser.add_argument("--ml", action="store_true", help="Enable machine learning payload selection")
     parser.add_argument("--no-wp", action="store_true", help="Skip WordPress admin notice checks")
+    parser.add_argument("--scope-file", help="Path to scope file with +include / -exclude regex lines")
+    parser.add_argument("--in-scope", action="append", default=[], help="Regex URL include rule (can be repeated)")
+    parser.add_argument("--out-of-scope", action="append", default=[], help="Regex URL exclude rule (can be repeated)")
+    parser.add_argument("--no-subdomains", action="store_true", help="Restrict scope to exact target host only")
     args = parser.parse_args()
 
     # Handle payload generation request
@@ -1025,6 +1095,16 @@ ________________________________________________________________________________
     target = args.target
     if not target.startswith('http'):
         target = 'http://' + target
+
+    file_in_scope, file_out_scope = load_scope_file(args.scope_file)
+    merged_in_scope = list(args.in_scope) + file_in_scope
+    merged_out_scope = list(args.out_of_scope) + file_out_scope
+    scope = ScopeManager(
+        target_url=target,
+        include_subdomains=not args.no_subdomains,
+        in_scope=merged_in_scope,
+        out_scope=merged_out_scope,
+    )
 
     # Cookies
     cookies = {}
@@ -1090,7 +1170,8 @@ ________________________________________________________________________________
 
     # 6. Crawl
     crawler = Crawler(target, max_depth=args.depth, cookies=cookies,
-                      delay=args.delay, jitter=args.jitter, proxy=args.proxy)
+                      delay=args.delay, jitter=args.jitter, proxy=args.proxy,
+                      scope_checker=scope.is_in_scope)
     if args.async_mode:
         async def run_async_crawl():
             async with aiohttp.ClientSession(headers=HEADERS) as aio_session:
@@ -1103,6 +1184,15 @@ ________________________________________________________________________________
         urls, forms = crawler.crawl_sync(session)
 
     print(f"[*] Discovered {len(urls)} URLs, {len(forms)} forms.")
+
+    # Scope-filter forms by action URL
+    scoped_forms = []
+    for form in forms:
+        action = urljoin(form.get('original_url', target), form.get('action') or '')
+        if scope.is_in_scope(action):
+            scoped_forms.append(form)
+    forms = scoped_forms
+    print(f"[*] In-scope forms: {len(forms)}")
 
     # Collect URL parameters
     url_params = {}
@@ -1134,6 +1224,8 @@ ________________________________________________________________________________
                 tasks = []
                 for url, params in url_params.items():
                     for param in params:
+                        if not scope.is_in_scope(url):
+                            continue
                         tasks.append(
                             tester.test_reflected_param_async(
                                 aio_session, url, param, base_payloads, sem
@@ -1156,6 +1248,8 @@ ________________________________________________________________________________
     else:
         for url, params in url_params.items():
             for param in params:
+                if not scope.is_in_scope(url):
+                    continue
                 res = tester.test_reflected_param_sync(url, param, base_payloads)
                 if res:
                     findings['reflected'].extend(res)
@@ -1194,7 +1288,7 @@ ________________________________________________________________________________
         for p in likely_paths:
             verification_urls.add(urljoin(target, p))
 
-        verification_urls = list(verification_urls)
+        verification_urls = [u for u in verification_urls if scope.is_in_scope(u)]
         for pass_no in [1, 2]:
             if pass_no == 2:
                 time.sleep(max(args.delay, 0.5))
@@ -1225,6 +1319,7 @@ ________________________________________________________________________________
             "javascript:alert(1)",
         ]
         urls_to_test = list(urls)
+        urls_to_test = [u for u in urls_to_test if scope.is_in_scope(u)]
         if args.dom_limit > 0 and len(urls_to_test) > args.dom_limit:
             urls_to_test = urls_to_test[:args.dom_limit]
         for url in urls_to_test:
@@ -1250,7 +1345,8 @@ ________________________________________________________________________________
         print("\n[*] Crawling WordPress admin area for admin notice XSS...")
         admin_crawler = Crawler(target, max_depth=1, cookies=cookies,
                                 path_filter=lambda u: '/wp-admin/' in u,
-                                delay=args.delay, jitter=args.jitter, proxy=args.proxy)
+                                delay=args.delay, jitter=args.jitter, proxy=args.proxy,
+                                scope_checker=scope.is_in_scope)
         admin_urls, _ = admin_crawler.crawl_sync(session)
         if admin_urls:
             print(f"[*] Found {len(admin_urls)} admin URLs.")
