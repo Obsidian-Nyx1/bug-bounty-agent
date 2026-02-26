@@ -192,13 +192,16 @@ def _show_reporting_menu() -> None:
 
 def _show_start_instructions() -> None:
     _print_section("Quick Instructions")
-    print(_color("Choose one usage mode:", CYAN, bold=True))
+    print(_color("Console mode is active. Type commands at the prompt.", ORANGE, bold=True))
     _print_table(
-        ["Mode", "How to Use"],
+        ["Command", "Action"],
         [
-            ["Interactive", "./bug_bounty  -> menu flow (RECON -> TESTS -> REPORTING)"],
-            ["CLI Subcommands", "./bug_bounty recon | test --tool xss | test --tool afrog | report | run-all"],
-            ["Full Help", "./bug_bounty --help"],
+            ["show options", "Display RECON / TESTS / REPORTING options"],
+            ["recon", "Run URL intake + scope/download discovery"],
+            ["tests", "Open testing console (xss, afrog, list, suggested)"],
+            ["report", "Open reporting console"],
+            ["help", "Show this instruction block again"],
+            ["quit", "Exit console"],
         ],
     )
     _print_table(
@@ -209,20 +212,6 @@ def _show_start_instructions() -> None:
             ["Operator", "Use --operator-id to keep your learning/checkpoint profile stable."],
         ],
     )
-
-
-def _startup_mode_prompt() -> str:
-    _print_section("Startup Mode")
-    _print_table(
-        ["Input", "Action"],
-        [
-            ["i", "Interactive menu workflow"],
-            ["c", "Show CLI command examples and exit"],
-            ["h", "Show full help and exit"],
-            ["q", "Quit"],
-        ],
-    )
-    return input(_color("Choose startup mode (i/c/h/q): ", MAGENTA, bold=True)).strip().lower()
 
 
 class _ProgressBar:
@@ -798,23 +787,8 @@ def main() -> int:
     args = parse_args()
     print(render_banner())
     print(_color("\n[Status] Starting ./bug_bounty", GREEN, bold=True))
-    print(_color("Ready.", CYAN))
-
-    # Only show startup chooser on plain invocation (no subcommand, no direct flags).
-    direct_mode = bool(args.command or args.non_interactive_output or args.run_xss_unified)
-    if not direct_mode:
-        choice = _startup_mode_prompt()
-        if choice == "c":
-            _show_start_instructions()
-            return 0
-        if choice == "h":
-            print(_color("Run: ./bug_bounty --help", CYAN, bold=True))
-            return 0
-        if choice == "q":
-            print(_color("[Quit] Session ended.", RED, bold=True))
-            return 0
-        # default to interactive menu when input is empty/unknown/i
-        print(_color("Interactive mode selected.", CYAN, bold=True))
+    print(_color("Ready.", ORANGE, bold=True))
+    _show_start_instructions()
 
     deps = ensure_runtime_dependencies(
         include_optional=False,
@@ -978,13 +952,25 @@ def main() -> int:
     tests_done = False
 
     while True:
-        _show_workflow_menu()
-        choice = input(_color("Select a step (1/2/3/q): ", MAGENTA, bold=True)).strip().lower()
-        if choice == "1":
+        command = input(_color("bug_bounty>> ", ORANGE, bold=True)).strip().lower()
+        if not command:
+            continue
+
+        if command in {"show options", "options", "menu"}:
+            _show_workflow_menu()
+            continue
+        if command in {"help", "show help"}:
+            _show_start_instructions()
+            continue
+        if command in {"q", "quit", "exit"}:
+            print(_color("[Quit] Session ended.", RED, bold=True))
+            break
+
+        if command in {"1", "recon"}:
             if not program_url and not args.no_prompt:
                 program_url = input("[Input] Paste project URL: ").strip()
             if not program_url:
-                print(_color("RECON needs a program URL. Provide URL and select 1 again.", RED, bold=True))
+                print(_color("RECON needs a program URL. Provide one and retry.", RED, bold=True))
                 continue
             if (
                 "hackerone.com/opportunities" in program_url
@@ -1006,14 +992,21 @@ def main() -> int:
             session_state.setdefault("steps", []).append(f"Session initialized: {layout.session_id}")
             session_state.setdefault("steps", []).append(f"RECON profile saved: {profile_path}")
             session_state.setdefault("steps", []).append(f"RECON completed for {program_url}.")
-        elif choice == "2":
+            continue
+
+        if command in {"2", "tests", "test"}:
             if not intake_viewed:
-                print(_color("RECON is mandatory. Complete step 1 first.", RED, bold=True))
+                print(_color("RECON is mandatory. Run `recon` first.", RED, bold=True))
                 continue
+            _show_test_mode_menu()
             while True:
-                _show_test_mode_menu()
-                mode_choice = input(_color("Choose mode (l/s/x/a/b): ", MAGENTA, bold=True)).strip().lower()
-                if mode_choice == "l":
+                mode_choice = input(_color("bug_bounty/tests>> ", ORANGE, bold=True)).strip().lower()
+                if mode_choice in {"b", "back"}:
+                    break
+                if mode_choice in {"show options", "options", "menu"}:
+                    _show_test_mode_menu()
+                    continue
+                if mode_choice in {"l", "list"}:
                     _print_section("Available Tests")
                     _print_table(
                         ["ID", "Test", "Status"],
@@ -1023,9 +1016,9 @@ def main() -> int:
                             ["NEXT", "future tests you add later", "placeholder"],
                         ],
                     )
-                elif mode_choice == "s":
+                elif mode_choice in {"s", "suggested"}:
                     _render_suggested_tests_table(result)
-                elif mode_choice == "x":
+                elif mode_choice in {"x", "xss"}:
                     core_deps = ensure_runtime_dependencies(
                         include_optional=False,
                         auto_install=not args.no_auto_install_deps,
@@ -1062,7 +1055,7 @@ def main() -> int:
                     if rc == 0:
                         tests_done = True
                         session_state.setdefault("steps", []).append("TESTS completed: XSS unified scan executed.")
-                elif mode_choice == "a":
+                elif mode_choice in {"a", "afrog"}:
                     _render_step_2(result)
                     rc = _run_afrog_safe_step(
                         result,
@@ -1073,11 +1066,11 @@ def main() -> int:
                     if rc == 0:
                         tests_done = True
                         session_state.setdefault("steps", []).append("TESTS completed: Afrog baseline scan executed.")
-                elif mode_choice == "b":
-                    break
                 else:
-                    print(_color("Invalid mode. Use l, s, x, a, or b.", RED, bold=True))
-        elif choice == "3":
+                    print(_color("Invalid test command. Use: show options | list | suggested | xss | afrog | back", RED, bold=True))
+            continue
+
+        if command in {"3", "report", "reporting"}:
             if not intake_viewed:
                 print(_color("Run RECON first.", YELLOW, bold=True))
                 continue
@@ -1090,32 +1083,33 @@ def main() -> int:
             session_state.setdefault("artifacts", []).append(auto_report_path)
             session_state.setdefault("steps", []).append("REPORTING invoked: automatic session report generated.")
             print(_color(f"[Auto Report] {auto_report_path}", GREEN, bold=True))
+            _show_reporting_menu()
             while True:
-                _show_reporting_menu()
-                r_choice = input(_color("Choose action (d/c/v/b): ", MAGENTA, bold=True)).strip().lower()
-                if r_choice == "d":
+                r_choice = input(_color("bug_bounty/report>> ", ORANGE, bold=True)).strip().lower()
+                if r_choice in {"b", "back"}:
+                    break
+                if r_choice in {"show options", "options", "menu"}:
+                    _show_reporting_menu()
+                    continue
+                if r_choice in {"d", "download"}:
                     out = _save_download_manifest(result, args.operator_id)
                     print(_color(f"[Saved] Download manifest: {out}", GREEN, bold=True))
-                elif r_choice == "c":
+                elif r_choice in {"c", "custom"}:
                     out = _save_custom_report(args.operator_id)
                     if out:
                         print(_color(f"[Saved] Custom report: {out}", GREEN, bold=True))
                     else:
                         print(_color("[Note] Custom report was not saved (empty note).", YELLOW, bold=True))
-                elif r_choice == "v":
+                elif r_choice in {"v", "view"}:
                     if not tests_done:
                         print(_color("[Note] No test execution recorded yet. Showing current compiled details.", YELLOW, bold=True))
                     _render_step_4(result)
                     _render_documentation(result)
-                elif r_choice == "b":
-                    break
                 else:
-                    print(_color("Invalid action. Use d, c, v, or b.", RED, bold=True))
-        elif choice == "q":
-            print(_color("[Quit] Session ended.", RED, bold=True))
-            break
-        else:
-            print(_color("Invalid choice. Use 1, 2, 3, or q.", RED, bold=True))
+                    print(_color("Invalid reporting command. Use: show options | download | custom | view | back", RED, bold=True))
+            continue
+
+        print(_color("Unknown command. Type `show options` or `help`.", RED, bold=True))
     return 0
 
 
