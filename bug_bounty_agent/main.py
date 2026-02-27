@@ -7,12 +7,15 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
+import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from bug_bounty_agent.agent import AgentInput, BugBountyAgent
 from bug_bounty_agent.banner import render_banner
@@ -50,6 +53,9 @@ class BackgroundXSSJob:
         self.exit_code: int | None = None
         self.started_at: float = 0.0
         self.options: dict = {}
+        self.current_idx: int = 0
+        self.total_targets: int = 0
+        self.current_target: str = ""
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -179,7 +185,6 @@ def _show_test_mode_menu() -> None:
     _print_table(
         ["Input", "Mode"],
         [
-            ["l", "List available tests"],
             ["x", "Run scope-aware XSS test (xss_unified.py)"],
             ["a", "Run safe in-scope Afrog baseline scan"],
             ["b", "Back to main menu"],
@@ -210,7 +215,9 @@ def _show_start_instructions() -> None:
         [
             ["show options", "Display RECON / TESTS / REPORTING options"],
             ["recon", "Run URL intake + scope/download discovery"],
-            ["tests", "Open testing console (xss, afrog, list)"],
+            ["tests", "Open testing console (xss, afrog)"],
+            ["status xss", "Show background XSS progress bar + current target"],
+            ["info", "Show background XSS status/progress"],
             ["report", "Open reporting console"],
             ["help", "Show this instruction block again"],
             ["quit", "Exit console"],
@@ -275,8 +282,9 @@ def _run_afrog_safe_step(
             ["1", "Checks if afrog is already installed."],
             ["2", "If missing, tries auto-install using Go."],
             ["3", "Builds approved in-scope target list from RECON."],
-            ["4", "Runs baseline scan: afrog -t <target>."],
-            ["5", "Saves logs under .bug_bounty_agent/reports/<operator>/afrog/."],
+            ["4", "Prompts user for scan profile + custom afrog flags."],
+            ["5", "Runs chosen scan command against approved targets."],
+            ["6", "Saves one consolidated afrog report (HTML)."],
         ],
     )
     _print_table(
@@ -316,13 +324,20 @@ def _run_afrog_safe_step(
         fallback_url = (session_state or {}).get("program_url") or "https://hackerone.com/unknown"
         session_layout = build_session_layout(operator_id, fallback_url)
 
+    afrog_opts = _prompt_afrog_options(afrog_bin)
     progress = _ProgressBar()
-    _print_section("Running Afrog Baseline")
+    _print_section("Running Afrog Scan")
 
     def _on_target(idx: int, total: int, target: str) -> None:
         progress.update(int((idx - 1) / max(1, total) * 100), f"afrog scan {idx}/{total}: {target}")
 
-    tool_run = run_afrog_scope(result, session_layout, afrog_bin, on_target=_on_target)
+    tool_run = run_afrog_scope(
+        result,
+        session_layout,
+        afrog_bin,
+        extra_args=list(afrog_opts.get("extra_args", []) or []),
+        on_target=_on_target,
+    )
     progress.finish("Afrog scans complete")
 
     for item in tool_run.targets:
@@ -332,8 +347,9 @@ def _run_afrog_safe_step(
         out_file = Path(artifact)
         if session_state is not None:
             session_state.setdefault("artifacts", []).append(str(out_file))
-            target_guess = out_file.stem.split("_")[0]
-            session_state.setdefault("findings", []).extend(_extract_afrog_findings(out_file, target_guess))
+            if out_file.suffix.lower() == ".txt":
+                target_guess = out_file.stem.split("_")[0]
+                session_state.setdefault("findings", []).extend(_extract_afrog_findings(out_file, target_guess))
     if tool_run.artifacts:
         print(_color(f"[Report] {tool_run.artifacts[0]}", GREEN, bold=True))
     if tool_run.index_file:
@@ -352,6 +368,7 @@ def _run_xss_unified_scope_step(
     session_layout: SessionLayout | None,
     xss_options: Optional[dict] = None,
     session_state: Optional[dict] = None,
+    progress_observer: Optional[Callable[[int, int, str], None]] = None,
 ) -> int:
     script_path = Path("xss_unified.py")
     if not script_path.exists():
@@ -383,6 +400,11 @@ def _run_xss_unified_scope_step(
     progress = _ProgressBar()
 
     def _on_target(idx: int, total: int, target: str) -> None:
+        if progress_observer:
+            try:
+                progress_observer(idx, total, target)
+            except Exception:
+                pass
         progress.update(int((idx - 1) / max(1, total) * 100), f"xss scan {idx}/{total}: {target}")
 
     opts = xss_options or {}
@@ -402,10 +424,10 @@ def _run_xss_unified_scope_step(
             session_state.setdefault("tested_targets", []).append({"tool": "xss_unified", "target": target})
     for artifact in tool_run.artifacts:
         out_file = Path(artifact)
-        target_guess = out_file.stem.split("_")[0]
         if session_state is not None:
             session_state.setdefault("artifacts", []).append(str(out_file))
-            session_state.setdefault("findings", []).extend(_extract_xss_findings(out_file, target_guess))
+    if session_state is not None and tool_run.findings:
+        session_state.setdefault("findings", []).extend(tool_run.findings)
     if tool_run.artifacts:
         print(_color(f"[Report] {tool_run.artifacts[0]}", GREEN, bold=True))
     if tool_run.index_file:
@@ -946,6 +968,108 @@ def _prompt_xss_options() -> dict:
     }
 
 
+def _get_afrog_help_text(afrog_bin: str) -> str:
+    for args in ([afrog_bin, "-h"], [afrog_bin, "--help"]):
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, check=False)
+        except Exception:
+            continue
+        text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        if text:
+            return text
+    return ""
+
+
+def _parse_afrog_flags(help_text: str) -> list[tuple[str, str]]:
+    flags: list[tuple[str, str]] = []
+    if not help_text:
+        return flags
+    for raw in help_text.splitlines():
+        line = " ".join(raw.strip().split())
+        if not line:
+            continue
+        if not line.startswith("-"):
+            continue
+        parts = re.split(r"\s{2,}|\t+", line, maxsplit=1)
+        flag_part = parts[0].strip()
+        desc = parts[1].strip() if len(parts) > 1 else ""
+        if flag_part and flag_part not in [f for f, _ in flags]:
+            flags.append((flag_part[:80], desc[:120] or "No description"))
+    return flags
+
+
+def _has_flag(help_text: str, token: str) -> bool:
+    return token in help_text
+
+
+def _prompt_afrog_options(afrog_bin: str) -> dict:
+    help_text = _get_afrog_help_text(afrog_bin)
+    parsed_flags = _parse_afrog_flags(help_text)
+
+    _print_section("Afrog Options")
+    if parsed_flags:
+        _print_table(
+            ["Flag", "What It Does"],
+            [[flag, desc] for flag, desc in parsed_flags[:40]],
+        )
+    else:
+        _print_table(
+            ["Flag", "What It Does"],
+            [["N/A", "Could not parse afrog help output; custom flags still allowed."]],
+        )
+
+    _print_table(
+        ["Profile", "Behavior"],
+        [
+            ["1 SAFE", "Minimal baseline scan speed and low-noise behavior."],
+            ["2 BALANCED", "Moderate scan intensity with practical coverage."],
+            ["3 AGGRESSIVE", "Higher scan intensity; more requests and potential noise."],
+        ],
+    )
+    profile_choice = input(_color("Select afrog profile [1/2/3] (default 1): ", MAGENTA, bold=True)).strip() or "1"
+
+    extra_args: list[str] = []
+    effects: list[list[str]] = []
+
+    if profile_choice == "3":
+        effects.append(["Profile", "Aggressive mode selected"])
+        if _has_flag(help_text, "--rate-limit"):
+            extra_args.extend(["--rate-limit", "300"])
+            effects.append(["--rate-limit 300", "Higher request throughput"])
+        elif _has_flag(help_text, "-rl"):
+            extra_args.extend(["-rl", "300"])
+            effects.append(["-rl 300", "Higher request throughput"])
+    elif profile_choice == "2":
+        effects.append(["Profile", "Balanced mode selected"])
+        if _has_flag(help_text, "--rate-limit"):
+            extra_args.extend(["--rate-limit", "120"])
+            effects.append(["--rate-limit 120", "Moderate request throughput"])
+        elif _has_flag(help_text, "-rl"):
+            extra_args.extend(["-rl", "120"])
+            effects.append(["-rl 120", "Moderate request throughput"])
+    else:
+        effects.append(["Profile", "Safe mode selected"])
+
+    custom = input(
+        _color(
+            "Add custom afrog flags (space-separated, optional), e.g. --rate-limit 80 --timeout 15: ",
+            MAGENTA,
+            bold=True,
+        )
+    ).strip()
+    if custom:
+        custom_args = shlex.split(custom)
+        extra_args.extend(custom_args)
+        effects.append(["Custom flags", " ".join(custom_args[:12]) + (" ..." if len(custom_args) > 12 else "")])
+
+    _print_section("Afrog Selection Summary")
+    _print_table(
+        ["Selected Option", "Effect"],
+        effects or [["None", "Default afrog behavior"]],
+    )
+    return {"extra_args": extra_args, "effects": effects, "parsed_flags": parsed_flags}
+
+
 def _resolve_program_inputs(args: argparse.Namespace) -> tuple[str | None, str | None]:
     program_url = args.program_url
     program_hint = args.program_hint
@@ -961,6 +1085,46 @@ def _resolve_program_inputs(args: argparse.Namespace) -> tuple[str | None, str |
             "[Input] Paste project handle/title from upper-left program header: "
         ).strip()
     return program_url, program_hint
+
+
+def _show_xss_background_status(session_state: dict) -> None:
+    job: BackgroundXSSJob = session_state.get("xss_job")
+    if not job:
+        print(_color("[Info] No XSS background job state available.", YELLOW, bold=True))
+        return
+    if job.running:
+        elapsed = int(time.time() - job.started_at)
+        idx = max(0, int(job.current_idx))
+        total = max(0, int(job.total_targets))
+        if total > 0:
+            pct = int(min(99, (idx / max(1, total)) * 100))
+        else:
+            pct = 5
+        bar = _ProgressBar()
+        bar.update(pct, f"xss scan {max(1, idx)}/{max(1, total)}: {job.current_target or 'starting'}")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        _print_table(
+            ["Field", "Value"],
+            [
+                ["Status", "running"],
+                ["Elapsed (s)", str(elapsed)],
+                ["Current target", job.current_target or "pending"],
+                ["Progress", f"{idx}/{total or '?'}"],
+            ],
+        )
+        return
+    if job.done:
+        status = "success" if job.exit_code == 0 else f"failed (exit {job.exit_code})"
+        _print_table(
+            ["Field", "Value"],
+            [
+                ["Status", f"completed: {status}"],
+                ["Last target count", str(job.total_targets or 0)],
+            ],
+        )
+        return
+    print(_color("[Info] No active XSS background job.", YELLOW, bold=True))
 
 
 def _run_recon_with_session(
@@ -1060,6 +1224,14 @@ def main() -> int:
         job.exit_code = None
         job.started_at = time.time()
         job.options = dict(options)
+        job.current_idx = 0
+        job.total_targets = 0
+        job.current_target = ""
+
+        def _observe_progress(idx: int, total: int, target: str) -> None:
+            job.current_idx = idx
+            job.total_targets = total
+            job.current_target = target
 
         def _worker() -> None:
             rc = _run_xss_unified_scope_step(
@@ -1068,6 +1240,7 @@ def main() -> int:
                 session_layout=session_state.get("session_layout"),
                 xss_options=options,
                 session_state=session_state,
+                progress_observer=_observe_progress,
             )
             job.exit_code = rc
             job.running = False
@@ -1195,6 +1368,9 @@ def main() -> int:
         if not command:
             continue
 
+        if command in {"status xss", "xss status", "info", "status"}:
+            _show_xss_background_status(session_state)
+            continue
         if command in {"show options", "options", "menu"}:
             _show_workflow_menu()
             continue
@@ -1251,17 +1427,7 @@ def main() -> int:
                 if mode_choice in {"show options", "options", "menu"}:
                     _show_test_mode_menu()
                     continue
-                if mode_choice in {"l", "list"}:
-                    _print_section("Available Tests")
-                    _print_table(
-                        ["ID", "Test", "Status"],
-                        [
-                            ["XSS-01", "scope-aware xss_unified.py", "available"],
-                            ["AFROG-01", "afrog baseline in-scope scan", "available"],
-                            ["NEXT", "future tests you add later", "placeholder"],
-                        ],
-                    )
-                elif mode_choice in {"x", "xss"}:
+                if mode_choice in {"x", "xss"}:
                     job: BackgroundXSSJob = session_state.get("xss_job")
                     if job.running:
                         print(_color("[Info] XSS background scan already running.", YELLOW, bold=True))
@@ -1325,7 +1491,7 @@ def main() -> int:
                         tests_done = True
                         session_state.setdefault("steps", []).append("TESTS completed: Afrog baseline scan executed.")
                 else:
-                    print(_color("Invalid test command. Use: show options | list | xss | afrog | back", RED, bold=True))
+                    print(_color("Invalid test command. Use: show options | xss | afrog | back", RED, bold=True))
             continue
 
         if command in {"3", "report", "reporting"}:
