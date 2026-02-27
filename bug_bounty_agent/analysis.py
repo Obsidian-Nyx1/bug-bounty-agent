@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+from urllib.parse import urlparse
 
 from bug_bounty_agent.discovery import DiscoveryData
 from bug_bounty_agent.scope import ScopeData
@@ -14,6 +15,27 @@ from bug_bounty_agent.scope import ScopeData
 SCOPE_VERIFIED_IN = "verified_in_scope_from_policy_or_artifact"
 SCOPE_VERIFIED_OUT = "verified_out_of_scope_from_policy_or_artifact"
 SCOPE_DISCOVERED_UNVERIFIED = "discovered_target_requires_scope_validation"
+TARGET_DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}$")
+NON_TARGET_HOSTS = {
+    "hackerone.com",
+    "www.hackerone.com",
+    "github.com",
+    "www.github.com",
+    "docs.github.com",
+    "x.com",
+    "www.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "reddit.com",
+    "www.reddit.com",
+    "discord.com",
+    "www.discord.com",
+    "next.js",
+    "nextjs.org",
+    "www.nextjs.org",
+    "npmjs.com",
+    "www.npmjs.com",
+}
 
 
 @dataclass
@@ -133,18 +155,18 @@ def _write_matrix_csv(project_key: str, operator_id: str, tests: list[TestCase])
 
 def _pick_targets(discovery: DiscoveryData, scope_data: ScopeData) -> list[str]:
     targets: list[str] = []
-    for item in scope_data.in_scope:
-        if item not in targets:
-            targets.append(item)
     for item in discovery.in_scope_domains:
-        if item not in targets:
-            targets.append(item)
-    for item in _verified_in_scope_non_domain_assets(discovery):
-        if item not in targets:
-            targets.append(item)
+        cleaned = _normalize_target(item)
+        if cleaned and _is_actionable_target(cleaned, discovery) and cleaned not in targets:
+            targets.append(cleaned)
+    for item in scope_data.in_scope:
+        cleaned = _normalize_target(item)
+        if cleaned and _is_actionable_target(cleaned, discovery) and cleaned not in targets:
+            targets.append(cleaned)
     for item in discovery.domain_candidates:
-        if item not in targets:
-            targets.append(item)
+        cleaned = _normalize_target(item)
+        if cleaned and _is_actionable_target(cleaned, discovery) and cleaned not in targets:
+            targets.append(cleaned)
     if not targets:
         if discovery.program_handle:
             targets.append(f"{discovery.program_handle}.program")
@@ -264,6 +286,30 @@ def _pick_best_target(
             best_score = score
             best_target = target
     return best_target
+
+
+def _normalize_target(value: str) -> str | None:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    if raw.startswith(("http://", "https://")):
+        host = (urlparse(raw).hostname or "").lower().strip(".")
+        return host or None
+    if TARGET_DOMAIN_RE.match(raw):
+        return raw[2:] if raw.startswith("*.") else raw
+    return None
+
+
+def _is_actionable_target(host: str, discovery: DiscoveryData) -> bool:
+    normalized = host.lower().strip(".")
+    if not normalized or normalized in NON_TARGET_HOSTS:
+        project_key = (discovery.project_key or "").lower()
+        if normalized == "github.com" and "github" in project_key:
+            return True
+        return False
+    if normalized.endswith(".hackerone.com"):
+        return False
+    return TARGET_DOMAIN_RE.match(normalized) is not None
 
 
 def _base_templates() -> list[TestTemplate]:
