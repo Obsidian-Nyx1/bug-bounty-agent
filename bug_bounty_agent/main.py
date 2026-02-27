@@ -30,15 +30,15 @@ from bug_bounty_agent.modules.reporting import compile_session_report
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
-CYAN = "\033[38;5;51m"
-GREEN = "\033[38;5;46m"
-YELLOW = "\033[38;5;220m"
-RED = "\033[38;5;196m"
-WHITE = "\033[38;5;255m"
-GRAY = "\033[38;5;117m"
 BLUE = "\033[38;5;39m"
-MAGENTA = "\033[38;5;201m"
-ORANGE = "\033[38;5;208m"
+CYAN = BLUE
+GREEN = BLUE
+YELLOW = BLUE
+RED = BLUE
+WHITE = BLUE
+GRAY = BLUE
+MAGENTA = BLUE
+ORANGE = BLUE
 DIM = "\033[2m"
 
 
