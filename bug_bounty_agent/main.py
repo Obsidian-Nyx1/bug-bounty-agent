@@ -180,7 +180,6 @@ def _show_test_mode_menu() -> None:
         ["Input", "Mode"],
         [
             ["l", "List available tests"],
-            ["s", "Show suggested tests table"],
             ["x", "Run scope-aware XSS test (xss_unified.py)"],
             ["a", "Run safe in-scope Afrog baseline scan"],
             ["b", "Back to main menu"],
@@ -211,7 +210,7 @@ def _show_start_instructions() -> None:
         [
             ["show options", "Display RECON / TESTS / REPORTING options"],
             ["recon", "Run URL intake + scope/download discovery"],
-            ["tests", "Open testing console (xss, afrog, list, suggested)"],
+            ["tests", "Open testing console (xss, afrog, list)"],
             ["report", "Open reporting console"],
             ["help", "Show this instruction block again"],
             ["quit", "Exit console"],
@@ -1262,8 +1261,6 @@ def main() -> int:
                             ["NEXT", "future tests you add later", "placeholder"],
                         ],
                     )
-                elif mode_choice in {"s", "suggested"}:
-                    _render_suggested_tests_table(result)
                 elif mode_choice in {"x", "xss"}:
                     job: BackgroundXSSJob = session_state.get("xss_job")
                     if job.running:
@@ -1328,7 +1325,7 @@ def main() -> int:
                         tests_done = True
                         session_state.setdefault("steps", []).append("TESTS completed: Afrog baseline scan executed.")
                 else:
-                    print(_color("Invalid test command. Use: show options | list | suggested | xss | afrog | back", RED, bold=True))
+                    print(_color("Invalid test command. Use: show options | list | xss | afrog | back", RED, bold=True))
             continue
 
         if command in {"3", "report", "reporting"}:
