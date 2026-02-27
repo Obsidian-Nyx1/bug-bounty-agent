@@ -56,6 +56,7 @@ class AgentResult:
     automated_findings: List[AutomatedFinding]
     automated_md_report: str | None
     automated_pdf_report: str | None
+    discovery_data: dict | None = None
 
 
 class BugBountyAgent:
@@ -305,6 +306,19 @@ class BugBountyAgent:
             automated_findings=automated.findings if automated else [],
             automated_md_report=automated.markdown_report if automated else None,
             automated_pdf_report=automated.pdf_report if automated else None,
+            discovery_data={
+                "project_url": discovery.project_url,
+                "project_key": discovery.project_key,
+                "platform": discovery.platform,
+                "program_handle": discovery.program_handle,
+                "domain_candidates": list(discovery.domain_candidates),
+                "in_scope_domains": list(discovery.in_scope_domains),
+                "out_scope_domains": list(discovery.out_scope_domains),
+                "allowed_scope_signals": list(discovery.allowed_scope_signals),
+                "out_scope_signals": list(discovery.out_scope_signals),
+                "sources": list(discovery.sources),
+                "downloaded_files": list(discovery.downloaded_files),
+            },
         )
 
     @staticmethod

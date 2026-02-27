@@ -9,6 +9,25 @@ from urllib.parse import urlparse
 
 
 DOMAIN_RE = re.compile(r"\b(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
+NON_TARGET_DOMAINS = {
+    "hackerone.com",
+    "www.hackerone.com",
+    "github.com",
+    "www.github.com",
+    "docs.github.com",
+    "x.com",
+    "www.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "reddit.com",
+    "www.reddit.com",
+    "discord.com",
+    "www.discord.com",
+    "nextjs.org",
+    "www.nextjs.org",
+    "npmjs.com",
+    "www.npmjs.com",
+}
 
 
 @dataclass
@@ -74,20 +93,30 @@ def recommend_domain(
     candidates: list[str],
     scope: ScopeData,
 ) -> DomainRecommendation:
-    project_host = (urlparse(project_url).hostname or "").lower()
-    ordered = []
-    if project_host and project_host not in {"hackerone.com", "www.hackerone.com"}:
+    project_host = _normalize_domain(urlparse(project_url).hostname or "")
+    project_root = _root_domain(project_host) if project_host else ""
+    ordered: list[str] = []
+    if project_host:
         ordered.append(project_host)
     for item in candidates:
-        low = item.lower()
-        if low not in ordered:
-            ordered.append(low)
+        normalized = _normalize_domain(item)
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    for item in scope.in_scope:
+        normalized = _normalize_domain(item)
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
 
-    if not ordered:
+    filtered = [
+        d for d in ordered
+        if _is_recommendable_domain(d, project_host=project_host, project_root=project_root)
+    ]
+
+    if not filtered:
         return DomainRecommendation(
             domain=None,
             status="unknown",
-            reason="No candidate domain was found from intake.",
+            reason="No actionable target domain was found from intake/scope artifacts.",
             allowed_tests=[],
             blocked_tests=[],
         )
@@ -95,7 +124,7 @@ def recommend_domain(
     best_domain = None
     best_score = -10_000
     best_status = "unknown"
-    for domain in ordered:
+    for domain in filtered:
         status = classify_domain(domain, scope)
         score = 0
         if status == "in-scope":
@@ -104,6 +133,10 @@ def recommend_domain(
             score += 20
         else:
             score -= 200
+        if project_host and (domain == project_host or domain.endswith("." + project_host)):
+            score += 45
+        if project_root and (domain == project_root or domain.endswith("." + project_root)):
+            score += 25
         if any(k in domain for k in ("api", "auth", "admin", "account")):
             score += 15
         if score > best_score:
@@ -189,3 +222,41 @@ def _matches(domain: str, pattern: str) -> bool:
         root = p[2:]
         return domain == root or domain.endswith("." + root)
     return domain == p
+
+
+def _normalize_domain(value: str) -> str:
+    v = (value or "").strip().lower().strip(".")
+    if not v:
+        return ""
+    if v.startswith(("http://", "https://")):
+        v = (urlparse(v).hostname or "").lower().strip(".")
+    if v.startswith("*."):
+        v = v[2:]
+    return v
+
+
+def _root_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    labels = [item for item in domain.split(".") if item]
+    if len(labels) < 2:
+        return domain
+    return ".".join(labels[-2:])
+
+
+def _is_recommendable_domain(domain: str, project_host: str, project_root: str) -> bool:
+    if not domain:
+        return False
+    if domain in {"hackerone.com", "www.hackerone.com"}:
+        return False
+    if domain in NON_TARGET_DOMAINS:
+        if project_host and (domain == project_host or domain.endswith("." + project_host)):
+            return True
+        if project_root and (domain == project_root or domain.endswith("." + project_root)):
+            return True
+        return False
+    if project_host and (domain == project_host or project_host.endswith("." + domain)):
+        return True
+    if project_root and (domain == project_root or domain.endswith("." + project_root)):
+        return True
+    return True
