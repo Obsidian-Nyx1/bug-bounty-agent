@@ -22,9 +22,18 @@ class SessionLayout:
 
 def build_session_layout(operator_id: str, program_url: str) -> SessionLayout:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-    host = urlparse(program_url).hostname or "unknown-program"
-    safe_host = re.sub(r"[^a-zA-Z0-9._-]+", "_", host.lower())
-    session_id = f"{safe_host}_{timestamp}"
+    parsed = urlparse(program_url)
+    host = parsed.hostname or "unknown-program"
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    session_key = host.lower()
+    if host.lower() == "hackerone.com" and path_parts:
+        session_key = path_parts[0].lower()
+    elif path_parts and path_parts[0] not in {"", "/"}:
+        session_key = f"{host.lower()}_{path_parts[0].lower()}"
+
+    safe_key = re.sub(r"[^a-zA-Z0-9._-]+", "_", session_key)
+    session_id = f"{safe_key}_{timestamp}"
     # Keep session artifacts in a simple top-level path for easy access.
     root = Path("reports") / operator_id / session_id
     recon_dir = root / "recon"

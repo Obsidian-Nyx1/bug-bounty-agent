@@ -16,13 +16,14 @@ DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}$")
 def persist_recon_profile(layout: SessionLayout, result, program_url: str, program_hint: str | None) -> str:
     ensure_layout(layout)
     adaptive = _build_adaptive_recon_outputs(layout, result, program_url)
+    discovery = getattr(result, "discovery_data", None) or {}
     payload = {
         "session_id": layout.session_id,
         "program_url": program_url,
         "program_hint": program_hint,
         "status": result.status,
         "summary": result.summary,
-        "project_key": result.report_path or "",
+        "project_key": discovery.get("project_key") or "",
         "recommendation": asdict(result.recommendation),
         "scope_data": asdict(result.scope_data),
         "downloaded_artifact_reasons": list(result.downloaded_artifact_reasons),
@@ -31,6 +32,7 @@ def persist_recon_profile(layout: SessionLayout, result, program_url: str, progr
         "test_matrix": [asdict(t) for t in result.test_matrix],
         "test_matrix_path": result.test_matrix_path,
         "report_path": result.report_path,
+        "discovery_data": discovery,
         "adaptive_recon": adaptive,
     }
     layout.recon_profile_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
