@@ -53,8 +53,11 @@ def _build_adaptive_recon_outputs(layout: SessionLayout, result, program_url: st
 
     scope_objects = []
     for domain in in_scope:
-        scope_objects.append({"type": "domain", "value": domain, "scope_status": "in-scope"})
+        status = "conflict" if domain in out_scope else "in-scope"
+        scope_objects.append({"type": "domain", "value": domain, "scope_status": status})
     for domain in out_scope:
+        if domain in in_scope:
+            continue
         scope_objects.append({"type": "domain", "value": domain, "scope_status": "out-of-scope"})
 
     test_targets = {}
@@ -222,7 +225,10 @@ def _build_graph(
 
         state = "NEW"
         scope_status = "unknown"
-        if is_out:
+        if conflict:
+            scope_status = "conflict"
+            state = "NEW"
+        elif is_out:
             scope_status = "out-of-scope"
             state = "NEW"
         elif is_in:

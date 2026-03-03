@@ -46,6 +46,10 @@ class DomainRecommendation:
     blocked_tests: list[str]
 
 
+def scope_conflicts(scope: ScopeData) -> list[str]:
+    return sorted(set(scope.in_scope).intersection(scope.out_scope))
+
+
 def parse_scope_file(scope_file: Path | None) -> ScopeData:
     if not scope_file or not scope_file.exists():
         return ScopeData(in_scope=[], out_scope=[], raw_lines=[])
@@ -129,6 +133,8 @@ def recommend_domain(
         score = 0
         if status == "in-scope":
             score += 100
+        elif status == "conflict":
+            score -= 300
         elif status == "unknown":
             score += 20
         else:
@@ -151,6 +157,20 @@ def recommend_domain(
             reason="No suitable domain candidate could be selected.",
             allowed_tests=[],
             blocked_tests=[],
+        )
+
+    if best_status == "conflict":
+        return DomainRecommendation(
+            domain=best_domain,
+            status=best_status,
+            reason=f"{best_domain} appears in both in-scope and out-of-scope scope sources.",
+            allowed_tests=[
+                "Pause active testing until the conflict is resolved from program artifacts."
+            ],
+            blocked_tests=[
+                "Do not send active scans/fuzzing payloads",
+                "Do not rely on broadened host-level assumptions for path-scoped exclusions",
+            ],
         )
 
     if best_status == "out-of-scope":
@@ -200,12 +220,22 @@ def recommend_domain(
 
 def classify_domain(domain: str, scope: ScopeData) -> str:
     d = domain.lower()
+    in_match = False
+    out_match = False
     for pattern in scope.out_scope:
         if _matches(d, pattern):
-            return "out-of-scope"
+            out_match = True
+            break
     for pattern in scope.in_scope:
         if _matches(d, pattern):
-            return "in-scope"
+            in_match = True
+            break
+    if in_match and out_match:
+        return "conflict"
+    if out_match:
+        return "out-of-scope"
+    if in_match:
+        return "in-scope"
     return "unknown"
 
 

@@ -82,6 +82,8 @@ class DiscoveryData:
     tab_links: list[str]
     allowed_scope_signals: list[str]
     out_scope_signals: list[str]
+    non_web_in_scope_assets: list[str]
+    non_web_out_scope_assets: list[str]
     sources: list[str]
 
     def as_prompt(self) -> str:
@@ -97,6 +99,8 @@ class DiscoveryData:
             f"Downloaded artifact reasons: {self.downloaded_artifact_reasons}\n"
             f"Allowed scope signals: {self.allowed_scope_signals}\n"
             f"Out-of-scope signals: {self.out_scope_signals}\n"
+            f"Non-web in-scope assets: {self.non_web_in_scope_assets}\n"
+            f"Non-web out-of-scope assets: {self.non_web_out_scope_assets}\n"
             f"Previous bug links: {self.previous_bug_links}\n"
             f"Social/public discussions: {self.social_discussion_links}\n"
             "Create an actionable bug bounty plan with completed vs pending phases."
@@ -368,11 +372,16 @@ def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str], list[st
             reader = csv.DictReader(handle)
             for row in reader:
                 ident = (row.get("identifier") or "").strip()
+                asset_type = (row.get("asset_type") or "").strip().upper()
                 instruction = (row.get("instruction") or "").strip().lower()
                 eligible_sub = (row.get("eligible_for_submission") or "").strip().lower()
                 eligible_bounty = (row.get("eligible_for_bounty") or "").strip().lower()
 
-                domains = _extract_domains_from_text(ident)
+                domains = _extract_domains_from_identifier(
+                    ident,
+                    asset_type=asset_type,
+                    allow_host_widening=not _is_path_specific_identifier(ident),
+                )
                 is_out = (
                     eligible_sub == "false"
                     or eligible_bounty == "false"
@@ -383,6 +392,8 @@ def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str], list[st
                     signal_value = ", ".join(domains[:3])
                 else:
                     signal_value = ident[:120] if ident else "unlabeled asset"
+                if asset_type:
+                    signal_value = f"{signal_value} [{asset_type}]"
                 if is_out:
                     blocked = f"{signal_value} (submission={eligible_sub or 'n/a'}, bounty={eligible_bounty or 'n/a'})"
                     if blocked not in blocked_signals:
@@ -420,7 +431,12 @@ def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str], l
 
     for item in include if isinstance(include, list) else []:
         host = str(item.get("host", ""))
-        domains = _extract_domains_from_text(host.replace("\\.", ".").replace("^", "").replace("$", ""))
+        file_pattern = str(item.get("file", "") or "")
+        domains = _extract_domains_from_identifier(
+            host.replace("\\.", ".").replace("^", "").replace("$", ""),
+            asset_type="BURP_SCOPE",
+            allow_host_widening=_is_global_burp_file_scope(file_pattern),
+        )
         if domains:
             signal = f"{', '.join(domains[:3])} (Burp include)"
             if signal not in allowed_signals:
@@ -430,7 +446,12 @@ def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str], l
                 in_scope.append(domain)
     for item in exclude if isinstance(exclude, list) else []:
         host = str(item.get("host", ""))
-        domains = _extract_domains_from_text(host.replace("\\.", ".").replace("^", "").replace("$", ""))
+        file_pattern = str(item.get("file", "") or "")
+        domains = _extract_domains_from_identifier(
+            host.replace("\\.", ".").replace("^", "").replace("$", ""),
+            asset_type="BURP_SCOPE",
+            allow_host_widening=_is_global_burp_file_scope(file_pattern),
+        )
         if domains:
             signal = f"{', '.join(domains[:3])} (Burp exclude)"
             if signal not in blocked_signals:
@@ -439,6 +460,37 @@ def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str], l
             if domain not in out_scope:
                 out_scope.append(domain)
     return in_scope[:100], out_scope[:100], allowed_signals[:50], blocked_signals[:50]
+
+
+def _extract_non_web_assets_from_csv(path: Path) -> tuple[list[str], list[str]]:
+    in_scope: list[str] = []
+    out_scope: list[str] = []
+    if not path.exists():
+        return in_scope, out_scope
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                ident = (row.get("identifier") or "").strip()
+                asset_type = (row.get("asset_type") or "").strip().upper()
+                if not ident or _asset_type_supports_web_targets(asset_type):
+                    continue
+                eligible_sub = (row.get("eligible_for_submission") or "").strip().lower()
+                eligible_bounty = (row.get("eligible_for_bounty") or "").strip().lower()
+                instruction = (row.get("instruction") or "").strip().lower()
+                is_out = (
+                    eligible_sub == "false"
+                    or eligible_bounty == "false"
+                    or "out of scope" in instruction
+                    or "excluded" in instruction
+                )
+                label = f"{ident} [{asset_type}]"
+                target = out_scope if is_out else in_scope
+                if label not in target:
+                    target.append(label)
+    except Exception:
+        return in_scope, out_scope
+    return in_scope[:50], out_scope[:50]
 
 
 def _extract_scope_signals_from_text(text: str) -> tuple[list[str], list[str]]:
@@ -457,6 +509,58 @@ def _extract_scope_signals_from_text(text: str) -> tuple[list[str], list[str]]:
             if line not in blocked:
                 blocked.append(line[:180])
     return allowed[:40], blocked[:40]
+
+
+def _asset_type_supports_web_targets(asset_type: str) -> bool:
+    normalized = (asset_type or "").strip().upper()
+    if not normalized:
+        return True
+    return normalized not in {"GOOGLE_PLAY_APP_ID", "APPLE_STORE_APP_ID"}
+
+
+def _extract_domains_from_identifier(identifier: str, asset_type: str, allow_host_widening: bool) -> list[str]:
+    if not identifier or not _asset_type_supports_web_targets(asset_type):
+        return []
+    if not allow_host_widening:
+        return []
+
+    raw = identifier.strip()
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower().strip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        return [host] if host else []
+
+    return _extract_domains_from_text(raw)
+
+
+def _is_path_specific_identifier(identifier: str) -> bool:
+    raw = (identifier or "").strip()
+    if not raw.startswith(("http://", "https://")):
+        return False
+    parsed = urlparse(raw)
+    path = (parsed.path or "").strip()
+    return bool(path and path not in {"", "/"})
+
+
+def _is_global_burp_file_scope(file_pattern: str) -> bool:
+    normalized = (file_pattern or "").strip()
+    if not normalized:
+        return True
+    return normalized in {"^/.*", "^/.*$", "^.*$", ".*", "/.*", "^/$"}
+
+
+def _find_cached_artifact(download_dir: Path, pattern: str) -> str | None:
+    matches = sorted(
+        download_dir.glob(pattern),
+        key=lambda item: item.stat().st_mtime if item.exists() else 0,
+        reverse=True,
+    )
+    for match in matches:
+        if match.is_file() and match.stat().st_size > 0:
+            return str(match)
+    return None
 
 
 def discover_project_context(
@@ -491,6 +595,8 @@ def discover_project_context(
     out_scope_domains: list[str] = []
     allowed_scope_signals: list[str] = []
     out_scope_signals: list[str] = []
+    non_web_in_scope_assets: list[str] = []
+    non_web_out_scope_assets: list[str] = []
 
     if handle:
         _progress(progress_hook, 28, f"Program handle detected: {handle}")
@@ -502,26 +608,37 @@ def discover_project_context(
             f"https://hackerone.com/teams/{handle}/assets/download_csv.csv",
             download_dir,
         )
+        csv_from_cache = False
+        if not csv_file:
+            csv_file = _find_cached_artifact(download_dir, f"scopes_for_{handle}_*.csv")
+            csv_from_cache = bool(csv_file)
         _progress(progress_hook, 40, "Downloading Burp scope JSON artifact")
         burp_file = _download_file(
             f"https://hackerone.com/teams/{handle}/assets/download_burp_project_file.json",
             download_dir,
         )
+        burp_from_cache = False
+        if not burp_file:
+            burp_file = _find_cached_artifact(download_dir, f"{handle}-*.json")
+            burp_from_cache = bool(burp_file)
         for path in [csv_file, burp_file]:
             if path:
                 downloaded_files.append(path)
                 if path == csv_file:
+                    suffix = " (cached fallback)" if csv_from_cache else ""
                     downloaded_artifact_reasons.append(
-                        f"{path} <- teams/{handle}/assets/download_csv.csv (scope inventory)"
+                        f"{path} <- teams/{handle}/assets/download_csv.csv (scope inventory{suffix})"
                     )
                 if path == burp_file:
+                    suffix = " (cached fallback)" if burp_from_cache else ""
                     downloaded_artifact_reasons.append(
-                        f"{path} <- teams/{handle}/assets/download_burp_project_file.json (include/exclude scope rules)"
+                        f"{path} <- teams/{handle}/assets/download_burp_project_file.json (include/exclude scope rules{suffix})"
                     )
 
         if csv_file:
             _progress(progress_hook, 48, "Parsing CSV scope artifact")
             csv_in, csv_out, csv_allow, csv_block = _extract_domains_from_csv(Path(csv_file))
+            csv_non_web_in, csv_non_web_out = _extract_non_web_assets_from_csv(Path(csv_file))
             for d in csv_in:
                 if d not in in_scope_domains:
                     in_scope_domains.append(d)
@@ -534,6 +651,12 @@ def discover_project_context(
             for s in csv_block:
                 if s not in out_scope_signals:
                     out_scope_signals.append(s)
+            for item in csv_non_web_in:
+                if item not in non_web_in_scope_assets:
+                    non_web_in_scope_assets.append(item)
+            for item in csv_non_web_out:
+                if item not in non_web_out_scope_assets:
+                    non_web_out_scope_assets.append(item)
 
         if burp_file:
             _progress(progress_hook, 54, "Parsing Burp JSON scope artifact")
@@ -628,5 +751,7 @@ def discover_project_context(
         tab_links=tab_links,
         allowed_scope_signals=allowed_scope_signals[:60],
         out_scope_signals=out_scope_signals[:60],
+        non_web_in_scope_assets=non_web_in_scope_assets[:60],
+        non_web_out_scope_assets=non_web_out_scope_assets[:60],
         sources=uniq_sources[:20],
     )

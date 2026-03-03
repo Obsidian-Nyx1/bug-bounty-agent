@@ -10,7 +10,7 @@ import re
 from urllib.parse import urlparse
 
 from bug_bounty_agent.discovery import DiscoveryData
-from bug_bounty_agent.scope import ScopeData
+from bug_bounty_agent.scope import ScopeData, classify_domain
 
 SCOPE_VERIFIED_IN = "verified_in_scope_from_policy_or_artifact"
 SCOPE_VERIFIED_OUT = "verified_out_of_scope_from_policy_or_artifact"
@@ -157,25 +157,38 @@ def _pick_targets(discovery: DiscoveryData, scope_data: ScopeData) -> list[str]:
     targets: list[str] = []
     for item in discovery.in_scope_domains:
         cleaned = _normalize_target(item)
-        if cleaned and _is_actionable_target(cleaned, discovery) and cleaned not in targets:
+        if (
+            cleaned
+            and _is_actionable_target(cleaned, discovery)
+            and classify_domain(cleaned, scope_data) == "in-scope"
+            and cleaned not in targets
+        ):
             targets.append(cleaned)
     for item in scope_data.in_scope:
         cleaned = _normalize_target(item)
-        if cleaned and _is_actionable_target(cleaned, discovery) and cleaned not in targets:
+        if (
+            cleaned
+            and _is_actionable_target(cleaned, discovery)
+            and classify_domain(cleaned, scope_data) == "in-scope"
+            and cleaned not in targets
+        ):
             targets.append(cleaned)
     for item in discovery.domain_candidates:
         cleaned = _normalize_target(item)
-        if cleaned and _is_actionable_target(cleaned, discovery) and cleaned not in targets:
+        if (
+            cleaned
+            and _is_actionable_target(cleaned, discovery)
+            and classify_domain(cleaned, scope_data) == "in-scope"
+            and cleaned not in targets
+        ):
             targets.append(cleaned)
-    if not targets:
-        if discovery.program_handle:
-            targets.append(f"{discovery.program_handle}.program")
-        else:
-            targets.append(discovery.project_key)
     return targets[:30]
 
 
 def _scope_basis_for_target(target: str, scope_data: ScopeData, discovery: DiscoveryData) -> str:
+    status = classify_domain(target, scope_data)
+    if status in {"conflict", "out-of-scope"}:
+        return SCOPE_VERIFIED_OUT
     if target in scope_data.in_scope or target in discovery.in_scope_domains:
         return SCOPE_VERIFIED_IN
     if target in _verified_in_scope_non_domain_assets(discovery):

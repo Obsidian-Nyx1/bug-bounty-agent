@@ -316,6 +316,8 @@ class BugBountyAgent:
                 "out_scope_domains": list(discovery.out_scope_domains),
                 "allowed_scope_signals": list(discovery.allowed_scope_signals),
                 "out_scope_signals": list(discovery.out_scope_signals),
+                "non_web_in_scope_assets": list(discovery.non_web_in_scope_assets),
+                "non_web_out_scope_assets": list(discovery.non_web_out_scope_assets),
                 "sources": list(discovery.sources),
                 "downloaded_files": list(discovery.downloaded_files),
             },
