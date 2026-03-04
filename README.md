@@ -206,6 +206,10 @@ Features:
   - URL/param async probing,
   - async reflected form probing (v3.1).
 - Reflected/stored/DOM XSS probes.
+- Automated reflected-XSS triage:
+  - classifies reflections by likely exploitability,
+  - flags common risky sink keywords,
+  - highlights likely false positives such as inert `javascript:` reflections.
 - WordPress detection (`/wp-admin/`, `/wp-content/`, `/wp-includes/`, `/wp-login.php`).
 - WordPress admin notice checks in `/wp-admin/` pages for risky HTML patterns.
 - Runtime knobs for depth/workers/delay/jitter/payload limits.
@@ -219,6 +223,7 @@ Features:
   - `reports/<operator-id>/<session-id>/recon/project.json`
   - `reports/<operator-id>/<session-id>/tests/index.json`
   - `reports/<operator-id>/<session-id>/tests/xss_unified/xss_unified_<timestamp>.json`
+    - reflected findings now include `triage` metadata and a `triage_summary`
   - `reports/<operator-id>/<session-id>/tests/afrog/...`
   - `reports/<operator-id>/<session-id>/reports/final_*.md`
 - Reports (legacy + additional):

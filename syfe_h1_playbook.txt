@@ -1,0 +1,273 @@
+Syfe HackerOne Playbook
+Generated: 2026-03-04
+
+Sources
+- https://hackerone.com/syfe_bbp
+- https://www.syfe.com/bug-bounty
+
+What is confirmed
+- Syfe's bug bounty program is hosted on HackerOne.
+- Syfe states that the most up-to-date in-scope and out-of-scope assets are maintained on the HackerOne program page.
+- Syfe's public bug bounty page says the program moved to HackerOne in March 2025.
+- Search-indexed HackerOne metadata identifies the program as a Managed bug bounty program with bounties and a displayed $50 minimum bounty.
+
+Program-safe operating rules
+- Test only assets that are explicitly in scope on HackerOne.
+- Use only accounts you own, or accounts for which you have explicit permission.
+- Avoid actions that disrupt service, damage data, or degrade the user experience.
+- If you encounter real user data, stop testing immediately and submit the report.
+- Use official channels only.
+- Allow at least 90 days from the initial report before any public disclosure.
+- Do not use extortion or pressure tactics.
+
+Known exclusions from Syfe's public policy
+- Network DoS or DDoS.
+- Low-severity header-only issues found by common scanners.
+- Content injection with negligible impact.
+- Logout CSRF and similar low-impact CSRF.
+- Missing cookie flags on non-sensitive cookies.
+- UI or UX bugs and spelling issues.
+- Bare 401 injection findings.
+- Stack traces that reveal only already-public information.
+- Host header issues without a working proof of concept.
+- Open ports without demonstrated impact.
+- Banner grabbing.
+- Missing X-Frame-Options without a meaningful clickjacking impact.
+- Cross-site tracing without a chained exploit.
+- CSP unsafe-inline by itself, without a real XSS path.
+- robots.txt disclosure by itself.
+- SPF-based email spoofing reports they already accept as risk.
+- Host-header-only open redirect.
+- User enumeration by itself.
+
+1. Recon checklist for Syfe
+
+Goal
+Build a target map that stays inside scope and prioritizes assets likely tied to money movement, identity, and account takeover.
+
+Phase 1: Scope capture
+- Open the HackerOne program page and copy the current in-scope assets into your notes before testing.
+- Label each asset by type: main app, auth, API, mobile backend, static content, marketing, support, third-party-managed, or wildcard.
+- Mark any environment qualifiers such as production-only, test-only, country-specific, or app-version-specific.
+- Record exclusions and bounty eligibility notes asset by asset, not just globally.
+
+Phase 2: Surface mapping
+- Resolve each scoped hostname and identify the application role from titles, flows, redirects, and public product pages.
+- Group assets around Syfe's visible product lines:
+  - Managed portfolios
+  - Brokerage
+  - Cash management
+  - SRS / wealth / business offerings
+- Enumerate authenticated entry points:
+  - Login
+  - Registration
+  - Email verification
+  - Password reset
+  - MFA or device trust
+  - Session management
+  - Profile and KYC
+  - Deposits, withdrawals, transfers, linked-bank actions
+  - Trading, watchlists, orders, portfolio actions
+- Map API traffic from the web app and mobile app to identify high-value JSON or GraphQL endpoints.
+
+Phase 3: Trust boundary mapping
+- Identify where unauthenticated users can become authenticated users.
+- Identify where normal users can attempt to access broker, admin, support, or internal-only workflows.
+- Identify every place a user can reference an object by ID, UUID, account number, order ID, file key, or document token.
+- Note every workflow that touches money, identity, documents, statements, tax files, or KYC media.
+- Look for integrations with payment rails, broker custody, support tooling, analytics, file storage, and document rendering.
+
+Phase 4: Session and client analysis
+- Check token storage and renewal behavior on web and mobile.
+- Check whether logout, password change, device revocation, or MFA changes invalidate old sessions.
+- Compare user roles and entitlement responses across accounts.
+- Inspect client-side feature flags, hidden endpoints, debug values, and environment leakage.
+
+Phase 5: Change-state workflow review
+- Focus on sensitive actions:
+  - Add or change bank account
+  - Withdraw funds
+  - Place or cancel orders
+  - Change email or phone
+  - Disable MFA
+  - Download account statements or tax documents
+  - Upload KYC documents
+- For each sensitive action, test authorization, replay, race conditions, CSRF relevance, and business-logic bypasses.
+
+Phase 6: Evidence discipline
+- Keep one note section per host with:
+  - Endpoint
+  - Auth state required
+  - Parameters
+  - Object identifiers
+  - Observed role checks
+  - Potential exploit path
+- Save raw requests and responses for anything that looks exploitable.
+- Do not over-collect data; use the minimum interaction needed for proof.
+
+Practical starting priority
+- Account takeover paths
+- IDOR/BOLA around portfolios, orders, statements, and KYC artifacts
+- Withdrawal or bank-linking abuse
+- MFA/session misbinding
+- Mobile API authorization gaps
+- Document/file access control
+
+2. Likely vulnerability shortlist for a fintech / brokerage target like Syfe
+
+Highest-value classes
+- Broken object level authorization (BOLA / IDOR)
+  - Access another user's portfolio, order, statement, KYC document, support ticket, bank-link object, or tax form by changing identifiers.
+- Broken function level authorization
+  - Reach privileged actions such as withdrawal approval, admin-only endpoints, support tooling, or internal portfolio operations from a normal account.
+- Account takeover
+  - Weak password reset flows, email change abuse, session fixation, OTP reuse, device-trust bypass, or MFA disablement without step-up verification.
+- Sensitive action business-logic abuse
+  - Change payout destination, withdraw funds, or alter orders without the intended sequence of checks.
+- Race conditions
+  - Double-submit or reorder requests around deposits, withdrawals, promo credits, referral rewards, or order execution windows.
+- Session management flaws
+  - Old sessions surviving password reset, MFA enrollment changes, or logout-all-devices actions.
+- Mobile/API auth gaps
+  - Mobile endpoints trusting client-supplied identity values, platform headers, or hidden parameters more than server-side entitlements.
+- File/document exposure
+  - Statement exports, KYC uploads, generated PDFs, S3-style object paths, signed URLs, or report downloads leaking across accounts.
+
+Very plausible secondary classes
+- Stored or reflected XSS in support, profile, referrals, watchlists, notes, onboarding forms, or document metadata.
+- SSRF in document import, URL fetch, webhook, statement render, or image validation features.
+- GraphQL authorization flaws, especially over-fetching of other users' objects through node IDs or introspection-derived fields.
+- Web cache deception or cache poisoning on authenticated or semi-authenticated content.
+- CORS misconfigurations that expose authenticated API data.
+- CSRF on genuinely sensitive state changes, if cookies are relied on and protections are inconsistent.
+- Host-header-dependent password reset poisoning, but only with a full working exploit.
+- Invitation or referral abuse that creates unintended rewards, account linking, or privilege crossover.
+- Verb tampering and content-type smuggling on API endpoints that validate only one request shape.
+- Insecure direct file upload leading to stored XSS or parser exploitation in downstream document workflows.
+
+Lower-yield or policy-risk areas
+- Header-only findings without impact.
+- Generic scanner output.
+- Version disclosure.
+- Missing flags on non-sensitive cookies.
+- Open ports without exploitability.
+- Clickjacking without a meaningful state-changing abuse case.
+
+Good test hypotheses for Syfe specifically
+- A user can access another user's portfolio summary or statement by modifying an account or document identifier.
+- Withdrawal destination changes do not require strong re-authentication.
+- MFA enrollment or device trust can be bypassed through an API endpoint that the web client uses after partial verification.
+- KYC or onboarding documents are stored behind predictable or reusable URLs.
+- Mobile-specific endpoints apply weaker authorization than browser-facing endpoints.
+- Trade/order endpoints trust client-side account references more than server-side ownership checks.
+- Support or messaging fields can render unsafely in an internal dashboard.
+- Promo, referral, or fee-calculation logic can be manipulated by sequence or concurrency.
+
+3. Report template aligned to Syfe's published rules
+
+Title
+[Impact-first summary] Broken access control allows one user to access another user's account statement
+
+Asset
+- Host: <scoped host>
+- Endpoint: <method> <path>
+- Environment: <prod / region / mobile API / web app>
+- Account type used: <self-owned test account only>
+
+Summary
+I identified a vulnerability in a scoped Syfe asset that allows <attacker capability> against <target object or action>. An authenticated attacker with a normal self-owned account can <read / modify / trigger> <sensitive resource> belonging to another user by <high-level technique>.
+
+Category
+- Vulnerability type: <BOLA / broken function auth / ATO / XSS / SSRF / business logic / race condition / session issue>
+- CWE: <if known>
+
+Severity rationale
+- Confidentiality impact: <none / low / medium / high>
+- Integrity impact: <none / low / medium / high>
+- Availability impact: <none / low / medium / high>
+- Business impact: <customer data exposure / fund movement risk / account takeover / compliance exposure / trust damage>
+
+Preconditions
+- I used only self-owned accounts.
+- Testing was limited to the minimum interaction needed to prove impact.
+- No unnecessary data was accessed, modified, or retained.
+- If any real user data was encountered, testing stopped immediately.
+
+Steps to reproduce
+1. Log in to Account A on <host>.
+2. Browse to <feature/workflow>.
+3. Capture the request to <method> <path>.
+4. Change <parameter/header/body field> from <Account A value> to <Account B style value or unauthorized object reference>.
+5. Send the modified request.
+6. Observe that the server returns <unauthorized data / successful state change / privileged action> instead of denying access.
+
+Proof of concept
+- Request:
+  <sanitized raw HTTP request or precise reproduction details>
+- Response:
+  <sanitized raw HTTP response or key fields demonstrating impact>
+- Notes:
+  <why this proves exploitable impact>
+
+Expected result
+The server should verify object ownership and role authorization server-side, then reject the request with an authorization error.
+
+Actual result
+The server processes the request and returns or changes data outside the attacker's authorization scope.
+
+Impact
+- What an attacker can do:
+  - <read other users' statements>
+  - <change a payout bank account>
+  - <place or cancel trades for another account>
+  - <take over an account or bypass MFA>
+- Why this matters in a fintech context:
+  - Exposure of financial data
+  - Unauthorized transactions or account changes
+  - KYC / privacy / regulatory risk
+
+Attack scenario
+An attacker creates a normal account, captures one legitimate request, modifies a predictable identifier, and iterates until another valid object is returned. The attacker then views or alters sensitive financial information or account state without authorization.
+
+Remediation guidance
+- Enforce authorization on every object lookup and state-changing action.
+- Derive the acting account and entitlements from the server-side session, not client-supplied identifiers.
+- Add step-up verification for high-risk actions such as payout changes, withdrawals, email changes, and MFA disablement.
+- Use non-predictable object references only as defense in depth, not as the primary control.
+- Invalidate sessions after password reset, MFA changes, and other sensitive account updates where appropriate.
+- Review adjacent endpoints that reuse the same service or authorization pattern.
+
+Sanitization note
+I have redacted or minimized sensitive values and kept the proof of concept limited to the minimum necessary for validation.
+
+Submission checklist
+- Confirm the exact asset is currently in scope on HackerOne.
+- Include one vulnerability per report unless chaining is required to demonstrate the issue.
+- Include precise reproduction steps and the exact request element that causes the issue.
+- Show real impact, not just misconfiguration.
+- Keep all evidence sanitized.
+- Do not publicly disclose until Syfe's policy window has elapsed and consent requirements are met.
+
+Quick-use mini template
+
+Title: <impact-first title>
+Asset: <host and endpoint>
+Bug class: <type>
+Impact: <one-sentence business impact>
+
+Steps
+1. <step 1>
+2. <step 2>
+3. <step 3>
+
+Observed result
+<what happened>
+
+Expected result
+<what should have happened>
+
+Evidence
+<request/response snippets, sanitized>
+
+Notes
+<constraints, account ownership, minimal testing statement>

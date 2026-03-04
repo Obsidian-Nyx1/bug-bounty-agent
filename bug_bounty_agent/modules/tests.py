@@ -132,6 +132,7 @@ def run_xss_scope(
             "stored": 0,
             "dom": 0,
             "wordpress_admin_notices": 0,
+            "triage_by_verdict": {},
         },
         "targets": [],
     }
@@ -167,11 +168,15 @@ def run_xss_scope(
             stored = len(target_data.get("stored", []))
             dom = len(target_data.get("dom", []))
             wp_notice = len(target_data.get("wordpress_admin_notices", []))
+            triage_summary = target_data.get("triage_summary", {})
 
             combined["summary"]["reflected"] += reflected
             combined["summary"]["stored"] += stored
             combined["summary"]["dom"] += dom
             combined["summary"]["wordpress_admin_notices"] += wp_notice
+            for verdict, count in triage_summary.get("by_verdict", {}).items():
+                current = combined["summary"]["triage_by_verdict"].get(verdict, 0)
+                combined["summary"]["triage_by_verdict"][verdict] = current + int(count)
 
             entry = {
                 "target": target,
@@ -182,6 +187,7 @@ def run_xss_scope(
                     "dom": dom,
                     "wordpress_admin_notices": wp_notice,
                 },
+                "triage_summary": triage_summary,
                 "findings": {
                     "reflected": target_data.get("reflected", []),
                     "stored": target_data.get("stored", []),
@@ -397,6 +403,7 @@ def _write_xss_consolidated_txt(path: Path, combined: dict) -> None:
         "Summary",
         f"- Failed targets: {combined.get('summary', {}).get('failed_targets', 0)}",
         f"- Reflected findings: {combined.get('summary', {}).get('reflected', 0)}",
+        f"- Reflected triage: {combined.get('summary', {}).get('triage_by_verdict', {})}",
         f"- Stored findings: {combined.get('summary', {}).get('stored', 0)}",
         f"- DOM findings: {combined.get('summary', {}).get('dom', 0)}",
         f"- WordPress notice findings: {combined.get('summary', {}).get('wordpress_admin_notices', 0)}",
@@ -416,6 +423,7 @@ def _write_xss_consolidated_txt(path: Path, combined: dict) -> None:
                     f"dom={tests.get('dom', 0)}, "
                     f"wp_notice={tests.get('wordpress_admin_notices', 0)}"
                 ),
+                f"   Reflected triage: {item.get('triage_summary', {}).get('by_verdict', {})}",
             ]
         )
         if item.get("error"):
@@ -452,7 +460,8 @@ def _write_xss_consolidated_html(path: Path, combined: dict) -> None:
             f"<td>{html.escape(str(item.get('target', 'n/a')))}</td>"
             f"<td>{item.get('exit_code', 'n/a')}</td>"
             f"<td>ref={tests.get('reflected', 0)} / stored={tests.get('stored', 0)} / "
-            f"dom={tests.get('dom', 0)} / wp={tests.get('wordpress_admin_notices', 0)}</td>"
+            f"dom={tests.get('dom', 0)} / wp={tests.get('wordpress_admin_notices', 0)}"
+            f"<br>triage={html.escape(str(item.get('triage_summary', {}).get('by_verdict', {})))}</td>"
             f"<td>{''.join(detail) or 'None'}</td>"
             "</tr>"
         )
@@ -469,6 +478,7 @@ def _write_xss_consolidated_html(path: Path, combined: dict) -> None:
         "<ul>"
         f"<li>Failed targets: {combined.get('summary', {}).get('failed_targets', 0)}</li>"
         f"<li>Reflected findings: {combined.get('summary', {}).get('reflected', 0)}</li>"
+        f"<li>Reflected triage: {html.escape(str(combined.get('summary', {}).get('triage_by_verdict', {})))}</li>"
         f"<li>Stored findings: {combined.get('summary', {}).get('stored', 0)}</li>"
         f"<li>DOM findings: {combined.get('summary', {}).get('dom', 0)}</li>"
         f"<li>WordPress notice findings: {combined.get('summary', {}).get('wordpress_admin_notices', 0)}</li>"

@@ -17,6 +17,7 @@ ________________________________________________________________________________
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import random
@@ -255,6 +256,111 @@ def detect_context(response_text, param_value):
     if re.search(rf'(href|src)=[\'"]?[^\'"]*{re.escape(param_value)}', response_text, re.IGNORECASE):
         contexts.append('url')
     return contexts
+
+def _normalize_whitespace(value):
+    return re.sub(r'\s+', ' ', value or '').strip()
+
+def extract_reflection_snippets(response_text, param_value, window=120, limit=2):
+    snippets = []
+    if not response_text or not param_value:
+        return snippets
+    for match in re.finditer(re.escape(param_value), response_text, re.IGNORECASE):
+        start = max(0, match.start() - window)
+        end = min(len(response_text), match.end() + window)
+        snippet = _normalize_whitespace(response_text[start:end])
+        if snippet and snippet not in snippets:
+            snippets.append(snippet)
+        if len(snippets) >= limit:
+            break
+    return snippets
+
+def triage_reflection(response_text, reflected_value, contexts):
+    normalized_contexts = sorted(set(contexts or []))
+    response_lower = response_text.lower()
+    reflected_lower = (reflected_value or "").lower()
+    snippets = extract_reflection_snippets(response_text, reflected_value)
+    occurrence_count = len(re.findall(re.escape(reflected_value), response_text, re.IGNORECASE)) if reflected_value else 0
+
+    escaped_forms = {
+        'html_escaped': html.escape(reflected_value or "", quote=True) in response_text if reflected_value else False,
+        'url_encoded': quote(reflected_value or "", safe="") in response_text if reflected_value else False,
+        'unicode_escaped': reflected_lower.replace("<", "\\u003c").replace(">", "\\u003e") in response_lower if reflected_lower else False,
+    }
+
+    sink_patterns = {
+        'innerHTML': r'innerhtml\s*=',
+        'outerHTML': r'outerhtml\s*=',
+        'document.write': r'document\.write(?:ln)?\s*\(',
+        'eval': r'(?<![\w.])eval\s*\(',
+        'Function': r'new\s+function\s*\(',
+        'setTimeout(string)': r'settimeout\s*\(\s*[\'"]',
+        'setInterval(string)': r'setinterval\s*\(\s*[\'"]',
+        'location': r'(window\.)?location(?:\.href)?\s*=',
+        'url_attr': r'(href|src|action)\s*=',
+    }
+    matched_sinks = [name for name, pattern in sink_patterns.items() if re.search(pattern, response_lower, re.IGNORECASE)]
+
+    script_breakout_chars = any(token in reflected_value for token in ("</script>", "';", '";', "`;")) if reflected_value else False
+    attr_breakout_chars = any(token in reflected_value for token in ('"', "'", " on", ">")) if reflected_value else False
+    javascript_scheme = reflected_lower.startswith("javascript:")
+    encoded_only = any(escaped_forms.values()) and reflected_value not in response_text
+
+    confidence = "low"
+    verdict = "reflection_only"
+    reasons = []
+
+    if normalized_contexts:
+        reasons.append(f"Reflected in context(s): {', '.join(normalized_contexts)}")
+    if occurrence_count > 1:
+        reasons.append(f"Reflected {occurrence_count} times in the response")
+    if matched_sinks:
+        reasons.append(f"Page contains risky sink keywords: {', '.join(matched_sinks)}")
+    if encoded_only:
+        reasons.append("Reflection appears encoded or escaped")
+    if javascript_scheme:
+        reasons.append("Payload is a javascript: scheme and needs a navigable sink to execute")
+
+    if 'script' in normalized_contexts and script_breakout_chars:
+        confidence = "high"
+        verdict = "promising"
+        reasons.append("Payload contains script-context breakout characters")
+    elif 'attribute' in normalized_contexts and attr_breakout_chars:
+        confidence = "medium"
+        verdict = "needs_manual_verification"
+        reasons.append("Payload may be able to break out of an attribute value")
+    elif 'url' in normalized_contexts and javascript_scheme:
+        confidence = "medium" if matched_sinks else "low"
+        verdict = "needs_manual_verification"
+        reasons.append("javascript: payload is only useful if the reflected value is later navigated or clicked")
+    elif matched_sinks and normalized_contexts:
+        confidence = "medium"
+        verdict = "needs_manual_verification"
+        reasons.append("Reflection and sink indicators coexist in the same response")
+    elif encoded_only or (javascript_scheme and set(normalized_contexts).issubset({'html', 'script'})):
+        verdict = "likely_false_positive"
+        reasons.append("Reflection pattern matches common scanner noise")
+
+    return {
+        'verdict': verdict,
+        'confidence': confidence,
+        'contexts': normalized_contexts,
+        'occurrences': occurrence_count,
+        'matched_sinks': matched_sinks,
+        'escaped_forms': escaped_forms,
+        'snippets': snippets,
+        'reasons': reasons,
+    }
+
+def build_reflected_finding(url, payload, response_text, **extra):
+    contexts = detect_context(response_text, payload)
+    finding = {
+        'url': url,
+        'payload': payload,
+        'contexts': contexts,
+        'triage': triage_reflection(response_text, payload, contexts),
+    }
+    finding.update(extra)
+    return finding
 
 def generate_polyglot_for_context(context):
     """Return a polyglot payload that works in the given context."""
@@ -570,6 +676,20 @@ def dedupe_findings(findings):
             findings[k] = dedupe_finding_list(v)
     return findings
 
+def summarize_reflected_triage(reflected_findings):
+    summary = {
+        'total': len(reflected_findings),
+        'by_verdict': {},
+        'by_confidence': {},
+    }
+    for finding in reflected_findings:
+        triage = finding.get('triage', {})
+        verdict = triage.get('verdict', 'unclassified')
+        confidence = triage.get('confidence', 'unknown')
+        summary['by_verdict'][verdict] = summary['by_verdict'].get(verdict, 0) + 1
+        summary['by_confidence'][confidence] = summary['by_confidence'].get(confidence, 0) + 1
+    return summary
+
 def ask_yes_no(prompt, default=True):
     suffix = " [Y/n]: " if default else " [y/N]: "
     while True:
@@ -753,14 +873,14 @@ class XSSTester:
                 resp = self._sync_request('GET', test_url, timeout=REQUEST_TIMEOUT)
                 # Check reflection
                 if encoded_payload in resp.text:
-                    # Detect context for future polyglots
-                    contexts = detect_context(resp.text, encoded_payload)
-                    findings.append({
-                        'url': test_url,
-                        'param': param,
-                        'payload': encoded_payload,
-                        'contexts': contexts
-                    })
+                    finding = build_reflected_finding(
+                        test_url,
+                        encoded_payload,
+                        resp.text,
+                        param=param,
+                    )
+                    contexts = finding['contexts']
+                    findings.append(finding)
                     # Context-aware polyglot probing (active runtime use)
                     for ctx in contexts:
                         polyglot = self._prepare_payload(generate_polyglot_for_context(ctx))
@@ -772,13 +892,13 @@ class XSSTester:
                         try:
                             poly_resp = self._sync_request('GET', poly_url, timeout=REQUEST_TIMEOUT)
                             if polyglot in poly_resp.text:
-                                findings.append({
-                                    'url': poly_url,
-                                    'param': param,
-                                    'payload': polyglot,
-                                    'contexts': [ctx],
-                                    'strategy': 'context_polyglot'
-                                })
+                                findings.append(build_reflected_finding(
+                                    poly_url,
+                                    polyglot,
+                                    poly_resp.text,
+                                    param=param,
+                                    strategy='context_polyglot',
+                                ))
                         except Exception:
                             pass
                     if self.ml_enabled and self.scorer:
@@ -816,13 +936,14 @@ class XSSTester:
                     async with aio_session.get(test_url, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as resp:
                         body = await resp.text()
                     if encoded_payload in body:
-                        contexts = detect_context(body, encoded_payload)
-                        findings.append({
-                            'url': test_url,
-                            'param': param,
-                            'payload': encoded_payload,
-                            'contexts': contexts
-                        })
+                        finding = build_reflected_finding(
+                            test_url,
+                            encoded_payload,
+                            body,
+                            param=param,
+                        )
+                        contexts = finding['contexts']
+                        findings.append(finding)
                         for ctx in contexts:
                             polyglot = self._prepare_payload(generate_polyglot_for_context(ctx))
                             if polyglot == encoded_payload:
@@ -834,13 +955,13 @@ class XSSTester:
                                 async with aio_session.get(poly_url, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as poly_resp:
                                     poly_body = await poly_resp.text()
                                 if polyglot in poly_body:
-                                    findings.append({
-                                        'url': poly_url,
-                                        'param': param,
-                                        'payload': polyglot,
-                                        'contexts': [ctx],
-                                        'strategy': 'context_polyglot'
-                                    })
+                                    findings.append(build_reflected_finding(
+                                        poly_url,
+                                        polyglot,
+                                        poly_body,
+                                        param=param,
+                                        strategy='context_polyglot',
+                                    ))
                             except Exception:
                                 pass
                         if self.ml_enabled and self.scorer:
@@ -878,8 +999,14 @@ class XSSTester:
                         async with aio_session.get(action, params=data, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as resp:
                             body = await resp.text()
                     if encoded_payload in body:
-                        findings.append({'url': action, 'data': data, 'payload': encoded_payload})
-                        contexts = detect_context(body, encoded_payload)
+                        finding = build_reflected_finding(
+                            action,
+                            encoded_payload,
+                            body,
+                            data=data,
+                        )
+                        contexts = finding['contexts']
+                        findings.append(finding)
                         for ctx in contexts:
                             polyglot = self._prepare_payload(generate_polyglot_for_context(ctx))
                             if polyglot == encoded_payload:
@@ -896,13 +1023,13 @@ class XSSTester:
                                     async with aio_session.get(action, params=poly_data, timeout=REQUEST_TIMEOUT, proxy=self._pick_proxy()) as poly_resp:
                                         poly_body = await poly_resp.text()
                                 if polyglot in poly_body:
-                                    findings.append({
-                                        'url': action,
-                                        'data': poly_data,
-                                        'payload': polyglot,
-                                        'contexts': [ctx],
-                                        'strategy': 'context_polyglot'
-                                    })
+                                    findings.append(build_reflected_finding(
+                                        action,
+                                        polyglot,
+                                        poly_body,
+                                        data=poly_data,
+                                        strategy='context_polyglot',
+                                    ))
                             except Exception:
                                 pass
                         if self.ml_enabled and self.scorer:
@@ -936,9 +1063,15 @@ class XSSTester:
                 else:
                     resp = self._sync_request('GET', action, params=data, timeout=REQUEST_TIMEOUT)
                 if encoded_payload in resp.text:
-                    findings.append({'url': action, 'data': data, 'payload': encoded_payload})
+                    finding = build_reflected_finding(
+                        action,
+                        encoded_payload,
+                        resp.text,
+                        data=data,
+                    )
+                    contexts = finding['contexts']
+                    findings.append(finding)
                     # Context-aware polyglot probing for form reflections
-                    contexts = detect_context(resp.text, encoded_payload)
                     for ctx in contexts:
                         polyglot = self._prepare_payload(generate_polyglot_for_context(ctx))
                         if polyglot == encoded_payload:
@@ -953,13 +1086,13 @@ class XSSTester:
                             else:
                                 poly_resp = self._sync_request('GET', action, params=poly_data, timeout=REQUEST_TIMEOUT)
                             if polyglot in poly_resp.text:
-                                findings.append({
-                                    'url': action,
-                                    'data': poly_data,
-                                    'payload': polyglot,
-                                    'contexts': [ctx],
-                                    'strategy': 'context_polyglot'
-                                })
+                                findings.append(build_reflected_finding(
+                                    action,
+                                    polyglot,
+                                    poly_resp.text,
+                                    data=poly_data,
+                                    strategy='context_polyglot',
+                                ))
                         except Exception:
                             pass
                     if self.ml_enabled and self.scorer:
@@ -1083,6 +1216,12 @@ class XSSTester:
 # 11. REPORTING
 # ----------------------------------------------------------------------
 def generate_html_report(findings, output_file):
+    reflected_items = findings.get('reflected', [])
+    verdict_totals = defaultdict(int)
+    for item in reflected_items:
+        verdict = item.get('triage', {}).get('verdict', 'unclassified')
+        verdict_totals[verdict] += 1
+
     html = """<!DOCTYPE html>
 <html>
 <head>
@@ -1097,11 +1236,20 @@ def generate_html_report(findings, output_file):
         .dom { border-left-color: #00f; }
         .wp { border-left-color: #0a0; }
         pre { background: #eee; padding: 5px; overflow-x: auto; }
+        table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; vertical-align: top; }
+        th { background: #f1f5f9; }
     </style>
 </head>
 <body>
     <h1>XSS Scan Report</h1>
 """
+    if reflected_items:
+        html += "<h2>Reflected Triage Summary</h2>\n"
+        html += "<table><thead><tr><th>Verdict</th><th>Count</th></tr></thead><tbody>\n"
+        for verdict in sorted(verdict_totals):
+            html += f"<tr><td>{html.escape(verdict)}</td><td>{verdict_totals[verdict]}</td></tr>\n"
+        html += "</tbody></table>\n"
     for vuln_type, items in findings.items():
         if not items:
             continue
@@ -1111,9 +1259,14 @@ def generate_html_report(findings, output_file):
             html += f'<div class="finding {css_class}">\n'
             if isinstance(item, dict):
                 for k, v in item.items():
-                    html += f"<strong>{k}:</strong> {v}<br>\n"
+                    if isinstance(v, dict):
+                        html += f"<strong>{k}:</strong><pre>{html.escape(json.dumps(v, indent=2))}</pre>\n"
+                    elif isinstance(v, list):
+                        html += f"<strong>{k}:</strong><pre>{html.escape(json.dumps(v, indent=2))}</pre>\n"
+                    else:
+                        html += f"<strong>{k}:</strong> {html.escape(str(v))}<br>\n"
             else:
-                html += f"<pre>{item}</pre>\n"
+                html += f"<pre>{html.escape(str(item))}</pre>\n"
             html += "</div>\n"
     html += """
 </body>
@@ -1607,6 +1760,7 @@ ________________________________________________________________________________
 
     # --- Dedupe findings before report ---
     findings = dedupe_findings(findings)
+    findings['triage_summary'] = summarize_reflected_triage(findings['reflected'])
 
     # --- ML efficiency message ---
     if args.ml and tester.scorer:
@@ -1616,6 +1770,8 @@ ________________________________________________________________________________
     # --- Output summary ---
     print("\n=== SCAN COMPLETE ===")
     print(f"Reflected XSS findings: {len(findings['reflected'])}")
+    if findings['triage_summary']['total']:
+        print(f"  Triage verdicts: {findings['triage_summary']['by_verdict']}")
     print(f"Stored XSS findings: {len(findings['stored'])}")
     print(f"DOM XSS findings: {len(findings['dom'])}")
     if wp_detected:
