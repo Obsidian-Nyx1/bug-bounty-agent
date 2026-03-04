@@ -21,6 +21,27 @@ from bug_bounty_agent.scope import classify_domain
 DOMAIN_RE = re.compile(r"^(?:\*\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$")
 URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
 
+XSS_MANUAL_GUIDE = {
+    "meaning": (
+        "`needs_manual_verification` means the scanner found reflection in a risky context, "
+        "but execution has not been proven yet."
+    ),
+    "steps": [
+        "Open one flagged URL with the same auth state used during scanning.",
+        "Inspect whether the value lands in HTML, an attribute, a script block, CSS, or a URL sink.",
+        "Use the matching payload for that context and reload the page.",
+        "Confirm browser-side execution, not just string reflection.",
+        "If execution succeeds, verify whether same-origin data or user actions become reachable.",
+    ],
+    "contexts": [
+        ("html", "<svg onload=alert(1)>", "Expected result: auto-execution when the fragment renders."),
+        ("attribute", '" autofocus onfocus=alert(1) x="', "Expected result: handler executes on focus/interaction."),
+        ("script", "</script><script>alert(1)</script>", "Expected result: payload breaks out of the JS block/string."),
+        ("css", "</style><script>alert(1)</script><style>", "Expected result: CSS context is escaped into script execution."),
+        ("url", "javascript:alert(1)", "Expected result: only valid if the app navigates or binds the value into a clickable sink."),
+    ],
+}
+
 
 @dataclass
 class ToolRunResult:
@@ -408,6 +429,16 @@ def _write_xss_consolidated_txt(path: Path, combined: dict) -> None:
         f"- DOM findings: {combined.get('summary', {}).get('dom', 0)}",
         f"- WordPress notice findings: {combined.get('summary', {}).get('wordpress_admin_notices', 0)}",
         "",
+        "Manual Verification Guide",
+        XSS_MANUAL_GUIDE["meaning"],
+        "Steps:",
+        *[f"- {step}" for step in XSS_MANUAL_GUIDE["steps"]],
+        "Context Payloads:",
+        *[
+            f"- {ctx}: {payload} | {note}"
+            for ctx, payload, note in XSS_MANUAL_GUIDE["contexts"]
+        ],
+        "",
         "Per Target Details",
     ]
     for idx, item in enumerate(combined.get("targets", []), start=1):
@@ -474,6 +505,17 @@ def _write_xss_consolidated_html(path: Path, combined: dict) -> None:
         "<h1>XSS Unified Consolidated Report</h1>"
         f"<p><strong>Generated:</strong> {html.escape(str(combined.get('generated_at', 'n/a')))}</p>"
         f"<p><strong>Targets tested:</strong> {combined.get('target_count', 0)}</p>"
+        "<h2>Manual Verification Guide</h2>"
+        f"<p>{html.escape(XSS_MANUAL_GUIDE['meaning'])}</p>"
+        "<ol>"
+        + "".join(f"<li>{html.escape(step)}</li>" for step in XSS_MANUAL_GUIDE["steps"])
+        + "</ol>"
+        "<table><thead><tr><th>Context</th><th>Payload</th><th>Expected Result</th></tr></thead><tbody>"
+        + "".join(
+            f"<tr><td>{html.escape(ctx)}</td><td><code>{html.escape(payload)}</code></td><td>{html.escape(note)}</td></tr>"
+            for ctx, payload, note in XSS_MANUAL_GUIDE["contexts"]
+        )
+        + "</tbody></table>"
         "<h2>Summary</h2>"
         "<ul>"
         f"<li>Failed targets: {combined.get('summary', {}).get('failed_targets', 0)}</li>"

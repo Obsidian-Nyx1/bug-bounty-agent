@@ -386,6 +386,94 @@ def get_validation_payloads_for_context(context):
     }
     return payloads.get(context, [])
 
+
+def expected_result_for_context(context):
+    notes = {
+        'html': "Browser-side JavaScript executes automatically when the reflected fragment is rendered.",
+        'attribute': "The injected event handler executes after the relevant interaction such as focus or hover.",
+        'script': "The payload breaks out of the existing JavaScript string or block and executes.",
+        'css': "The payload escapes the CSS context and script execution occurs.",
+        'url': "Execution occurs only if the value is placed into a navigable or clickable URL sink.",
+    }
+    return notes.get(context, "Browser-side JavaScript execution is observed.")
+
+
+def build_verification_plan(contexts, validation=None):
+    ordered_contexts = list(contexts or [])
+    if not ordered_contexts:
+        ordered_contexts = ['html']
+    primary_context = ordered_contexts[0]
+    primary_payloads = get_validation_payloads_for_context(primary_context)
+    primary_payload = primary_payloads[0] if primary_payloads else "<svg onload=alert(1)>"
+    attempted = bool((validation or {}).get('attempted'))
+    executed = bool((validation or {}).get('executed'))
+    return {
+        'primary_context': primary_context,
+        'primary_payload': primary_payload,
+        'expected_result': expected_result_for_context(primary_context),
+        'attempted_automatically': attempted,
+        'execution_confirmed': executed,
+        'fallback_payloads': {
+            ctx: get_validation_payloads_for_context(ctx)
+            for ctx in ordered_contexts
+        },
+    }
+
+
+def manual_verification_guidance(findings):
+    reflected = findings.get('reflected', []) if isinstance(findings, dict) else []
+    contexts = []
+    for item in reflected:
+        for ctx in item.get('contexts', []) or []:
+            if ctx not in contexts:
+                contexts.append(ctx)
+
+    payloads_by_context = {
+        'html': "<svg onload=alert(1)>",
+        'attribute': '" autofocus onfocus=alert(1) x="',
+        'script': "</script><script>alert(1)</script>",
+        'css': "</style><script>alert(1)</script><style>",
+        'url': "javascript:alert(1)",
+    }
+    context_notes = {
+        'html': "Expected result: JavaScript executes automatically when the HTML fragment is rendered.",
+        'attribute': "Expected result: the injected event handler runs after focus/hover or another required interaction.",
+        'script': "Expected result: the payload breaks out of the current JS string/block and executes.",
+        'css': "Expected result: CSS context is escaped and a script block executes.",
+        'url': "Expected result: the application places the value into a navigable href/src/location sink and execution occurs on click or redirect.",
+    }
+
+    steps = [
+        "1. Open one flagged URL with the same authentication state used during scanning.",
+        "2. Inspect where the parameter lands in the response: HTML text, attribute, script block, CSS, or URL sink.",
+        "3. Use the payload below that matches the reflected context.",
+        "4. Re-load the page and watch for execution, browser alerts, DOM mutation, navigation, or console evidence.",
+        "5. If execution occurs, confirm whether same-origin data or authenticated actions become reachable.",
+    ]
+
+    expected = [
+        "A valid XSS confirmation means the payload executes in the browser, not just that the string is reflected.",
+        "If the string is visible in page source but no execution occurs with the context-appropriate payload, treat it as a false positive.",
+        "For javascript: payloads, execution only counts if the app actually navigates or binds that value into a clickable/triggered sink.",
+    ]
+
+    context_lines = []
+    for ctx in contexts or ['html', 'attribute', 'script', 'url']:
+        payload = payloads_by_context.get(ctx)
+        note = context_notes.get(ctx)
+        if payload and note:
+            context_lines.append((ctx, payload, note))
+
+    return {
+        'meaning': (
+            "`needs_manual_verification` means the scanner saw reflection in a potentially dangerous context, "
+            "but did not yet prove browser-side JavaScript execution."
+        ),
+        'steps': steps,
+        'contexts': context_lines,
+        'expected': expected,
+    }
+
 def generate_polyglot_for_context(context):
     """Return a polyglot payload that works in the given context."""
     polyglots = {
@@ -964,6 +1052,10 @@ class XSSTester:
                 reasons.append("Headless validation did not observe execution")
         triage['reasons'] = reasons
         finding['triage'] = triage
+        finding['verification_plan'] = build_verification_plan(
+            triage.get('contexts') or finding.get('contexts') or [],
+            validation=validation,
+        )
         return finding
 
     # --- Core test methods (sync versions) ---
@@ -1342,6 +1434,7 @@ def generate_html_report(findings, output_file):
     for item in reflected_items:
         verdict = item.get('triage', {}).get('verdict', 'unclassified')
         verdict_totals[verdict] += 1
+    guide = manual_verification_guidance(findings)
 
     html = """<!DOCTYPE html>
 <html>
@@ -1365,6 +1458,24 @@ def generate_html_report(findings, output_file):
 <body>
     <h1>XSS Scan Report</h1>
 """
+    html += "<h2>Manual Verification Guide</h2>\n"
+    html += f"<p>{html.escape(guide['meaning'])}</p>\n"
+    html += "<ol>\n"
+    for step in guide['steps']:
+        html += f"<li>{html.escape(step[3:] if step[:2].isdigit() and step[2] == '.' else step)}</li>\n"
+    html += "</ol>\n"
+    html += "<table><thead><tr><th>Context</th><th>Payload</th><th>Expected Result</th></tr></thead><tbody>\n"
+    for ctx, payload, note in guide['contexts']:
+        html += (
+            f"<tr><td>{html.escape(ctx)}</td>"
+            f"<td><code>{html.escape(payload)}</code></td>"
+            f"<td>{html.escape(note)}</td></tr>\n"
+        )
+    html += "</tbody></table>\n"
+    html += "<ul>\n"
+    for line in guide['expected']:
+        html += f"<li>{html.escape(line)}</li>\n"
+    html += "</ul>\n"
     if reflected_items:
         html += "<h2>Reflected Triage Summary</h2>\n"
         html += "<table><thead><tr><th>Verdict</th><th>Count</th></tr></thead><tbody>\n"
