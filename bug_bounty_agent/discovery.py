@@ -84,6 +84,7 @@ class DiscoveryData:
     out_scope_signals: list[str]
     non_web_in_scope_assets: list[str]
     non_web_out_scope_assets: list[str]
+    normalized_scope_assets: list[dict]
     sources: list[str]
 
     def as_prompt(self) -> str:
@@ -101,6 +102,7 @@ class DiscoveryData:
             f"Out-of-scope signals: {self.out_scope_signals}\n"
             f"Non-web in-scope assets: {self.non_web_in_scope_assets}\n"
             f"Non-web out-of-scope assets: {self.non_web_out_scope_assets}\n"
+            f"Normalized scope assets: {self.normalized_scope_assets[:20]}\n"
             f"Previous bug links: {self.previous_bug_links}\n"
             f"Social/public discussions: {self.social_discussion_links}\n"
             "Create an actionable bug bounty plan with completed vs pending phases."
@@ -414,6 +416,206 @@ def _extract_domains_from_csv(path: Path) -> tuple[list[str], list[str], list[st
     return in_scope[:100], out_scope[:100], allowed_signals[:50], blocked_signals[:50]
 
 
+def _normalize_scope_status(*, eligible_submission: str, eligible_bounty: str, instruction: str, source_state: str | None = None) -> str:
+    if source_state in {"include", "exclude"}:
+        return "in-scope" if source_state == "include" else "out-of-scope"
+    if eligible_submission == "false" or eligible_bounty == "false":
+        return "out-of-scope"
+    low_instruction = (instruction or "").lower()
+    if "out of scope" in low_instruction or "excluded" in low_instruction:
+        return "out-of-scope"
+    return "in-scope"
+
+
+def _normalize_asset_category(asset_type: str, identifier: str) -> str:
+    normalized = (asset_type or "").strip().upper()
+    raw = (identifier or "").strip().lower()
+    if normalized in {"GOOGLE_PLAY_APP_ID", "APPLE_STORE_APP_ID"}:
+        return "mobile_app"
+    if raw.startswith(("http://", "https://")) or normalized in {"URL", "BURP_SCOPE"}:
+        return "web"
+    if normalized:
+        return normalized.lower()
+    return "unknown"
+
+
+def _normalize_scope_asset(
+    *,
+    identifier: str,
+    asset_type: str,
+    source: str,
+    scope_status: str,
+    instruction: str = "",
+    eligible_submission: str = "",
+    eligible_bounty: str = "",
+    host: str = "",
+    protocol: str = "",
+    port: str = "",
+    file_pattern: str = "",
+    max_severity: str = "",
+) -> dict:
+    raw_identifier = (identifier or "").strip()
+    category = _normalize_asset_category(asset_type, raw_identifier)
+    normalized_domains = _extract_domains_from_identifier(
+        raw_identifier if raw_identifier else host,
+        asset_type=asset_type,
+        allow_host_widening=not _is_path_specific_identifier(raw_identifier or host),
+    )
+
+    normalized_hosts: list[str] = []
+    candidate_hosts = [host, raw_identifier]
+    for candidate in candidate_hosts:
+        value = (candidate or "").strip()
+        if not value:
+            continue
+        if value.startswith(("http://", "https://")):
+            parsed = urlparse(value)
+            value = (parsed.hostname or "").lower().strip(".")
+        value = value.replace("\\.", ".").replace("^", "").replace("$", "").strip(".")
+        if value.startswith("*."):
+            value = value[2:]
+        if value and re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,}", value) and value not in normalized_hosts:
+            normalized_hosts.append(value)
+
+    path = ""
+    if raw_identifier.startswith(("http://", "https://")):
+        parsed = urlparse(raw_identifier)
+        path = parsed.path or "/"
+    elif file_pattern:
+        path = file_pattern
+
+    return {
+        "value": raw_identifier or host,
+        "asset_type": (asset_type or "").strip().upper() or "UNKNOWN",
+        "asset_category": category,
+        "scope_status": scope_status,
+        "source": source,
+        "normalized_hosts": normalized_hosts,
+        "normalized_domains": normalized_domains,
+        "host": normalized_hosts[0] if normalized_hosts else "",
+        "protocol": (protocol or "").strip().lower(),
+        "port": (port or "").strip(),
+        "path": path,
+        "eligible_for_submission": eligible_submission,
+        "eligible_for_bounty": eligible_bounty,
+        "max_severity": (max_severity or "").strip().lower(),
+        "instruction": " ".join((instruction or "").split())[:300],
+    }
+
+
+def _merge_scope_assets(assets: list[dict]) -> list[dict]:
+    merged: dict[tuple[str, str, str, str, str], dict] = {}
+    for asset in assets:
+        key = (
+            str(asset.get("value") or ""),
+            str(asset.get("asset_type") or ""),
+            str(asset.get("scope_status") or ""),
+            str(asset.get("host") or ""),
+            str(asset.get("path") or ""),
+        )
+        if key not in merged:
+            item = dict(asset)
+            item["sources"] = [asset.get("source")] if asset.get("source") else []
+            merged[key] = item
+            continue
+        existing = merged[key]
+        for field in ("normalized_hosts", "normalized_domains", "sources"):
+            combined = list(existing.get(field, []))
+            for value in asset.get(field, []) if isinstance(asset.get(field), list) else []:
+                if value not in combined:
+                    combined.append(value)
+            source_value = asset.get("source")
+            if field == "sources" and source_value and source_value not in combined:
+                combined.append(source_value)
+            existing[field] = combined
+        for field in ("instruction", "protocol", "port", "max_severity", "eligible_for_submission", "eligible_for_bounty"):
+            if not existing.get(field) and asset.get(field):
+                existing[field] = asset.get(field)
+    out = list(merged.values())
+    out.sort(key=lambda item: (
+        str(item.get("scope_status") or ""),
+        str(item.get("asset_category") or ""),
+        str(item.get("value") or ""),
+    ))
+    return out
+
+
+def _extract_scope_assets_from_csv(path: Path) -> list[dict]:
+    assets: list[dict] = []
+    if not path.exists():
+        return assets
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                identifier = (row.get("identifier") or "").strip()
+                asset_type = (row.get("asset_type") or "").strip().upper()
+                instruction = (row.get("instruction") or "").strip()
+                eligible_sub = (row.get("eligible_for_submission") or "").strip().lower()
+                eligible_bounty = (row.get("eligible_for_bounty") or "").strip().lower()
+                max_severity = (row.get("max_severity") or "").strip()
+                if not identifier:
+                    continue
+                assets.append(
+                    _normalize_scope_asset(
+                        identifier=identifier,
+                        asset_type=asset_type,
+                        source="hackerone_csv",
+                        scope_status=_normalize_scope_status(
+                            eligible_submission=eligible_sub,
+                            eligible_bounty=eligible_bounty,
+                            instruction=instruction,
+                        ),
+                        instruction=instruction,
+                        eligible_submission=eligible_sub,
+                        eligible_bounty=eligible_bounty,
+                        max_severity=max_severity,
+                    )
+                )
+    except Exception:
+        return assets
+    return assets
+
+
+def _extract_scope_assets_from_burp_json(path: Path) -> list[dict]:
+    assets: list[dict] = []
+    if not path.exists():
+        return assets
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return assets
+    target = data.get("target", {}).get("scope", {})
+    include = target.get("include", []) if isinstance(target, dict) else []
+    exclude = target.get("exclude", []) if isinstance(target, dict) else []
+    for state, items in (("include", include), ("exclude", exclude)):
+        for item in items if isinstance(items, list) else []:
+            host = str(item.get("host", "")).replace("\\.", ".").replace("^", "").replace("$", "")
+            protocol = str(item.get("protocol", ""))
+            port = str(item.get("port", ""))
+            file_pattern = str(item.get("file", "") or "")
+            if not host:
+                continue
+            assets.append(
+                _normalize_scope_asset(
+                    identifier=host,
+                    asset_type="BURP_SCOPE",
+                    source="burp_scope_json",
+                    scope_status=_normalize_scope_status(
+                        eligible_submission="",
+                        eligible_bounty="",
+                        instruction="",
+                        source_state=state,
+                    ),
+                    host=host,
+                    protocol=protocol,
+                    port=port,
+                    file_pattern=file_pattern,
+                )
+            )
+    return assets
+
+
 def _extract_domains_from_burp_json(path: Path) -> tuple[list[str], list[str], list[str], list[str]]:
     in_scope: list[str] = []
     out_scope: list[str] = []
@@ -597,6 +799,7 @@ def discover_project_context(
     out_scope_signals: list[str] = []
     non_web_in_scope_assets: list[str] = []
     non_web_out_scope_assets: list[str] = []
+    normalized_scope_assets: list[dict] = []
 
     if handle:
         _progress(progress_hook, 28, f"Program handle detected: {handle}")
@@ -639,6 +842,7 @@ def discover_project_context(
             _progress(progress_hook, 48, "Parsing CSV scope artifact")
             csv_in, csv_out, csv_allow, csv_block = _extract_domains_from_csv(Path(csv_file))
             csv_non_web_in, csv_non_web_out = _extract_non_web_assets_from_csv(Path(csv_file))
+            normalized_scope_assets.extend(_extract_scope_assets_from_csv(Path(csv_file)))
             for d in csv_in:
                 if d not in in_scope_domains:
                     in_scope_domains.append(d)
@@ -661,6 +865,7 @@ def discover_project_context(
         if burp_file:
             _progress(progress_hook, 54, "Parsing Burp JSON scope artifact")
             b_in, b_out, b_allow, b_block = _extract_domains_from_burp_json(Path(burp_file))
+            normalized_scope_assets.extend(_extract_scope_assets_from_burp_json(Path(burp_file)))
             for d in b_in:
                 if d not in in_scope_domains:
                     in_scope_domains.append(d)
@@ -753,5 +958,6 @@ def discover_project_context(
         out_scope_signals=out_scope_signals[:60],
         non_web_in_scope_assets=non_web_in_scope_assets[:60],
         non_web_out_scope_assets=non_web_out_scope_assets[:60],
+        normalized_scope_assets=_merge_scope_assets(normalized_scope_assets)[:250],
         sources=uniq_sources[:20],
     )

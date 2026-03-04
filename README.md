@@ -13,6 +13,7 @@ Interactive bug bounty assistant focused on authorized testing workflows.
   - gathers policy/scope/docs candidates,
   - downloads HackerOne scope artifacts when available (`CSV` + Burp JSON),
   - extracts in-scope/out-of-scope signals,
+  - normalizes scope assets into a structured recon inventory,
   - finds prior bug/write-up links and social discussions.
 - Runs target recommendation:
   - suggests next target,
@@ -221,6 +222,7 @@ Features:
 
 - Session artifacts:
   - `reports/<operator-id>/<session-id>/recon/project.json`
+  - `reports/<operator-id>/<session-id>/recon/normalized_scope_inventory.json`
   - `reports/<operator-id>/<session-id>/tests/index.json`
   - `reports/<operator-id>/<session-id>/tests/xss_unified/xss_unified_<timestamp>.json`
     - reflected findings now include `triage` metadata and a `triage_summary`

@@ -48,19 +48,33 @@ def _build_adaptive_recon_outputs(layout: SessionLayout, result, program_url: st
     in_scope = _collect_domains(in_scope_raw + list(discovery.get("in_scope_domains", []) or []))
     out_scope = _collect_domains(out_scope_raw + list(discovery.get("out_scope_domains", []) or []))
     candidates = _collect_domains(list(discovery.get("domain_candidates", []) or []))
+    normalized_scope_assets = _normalize_scope_assets(list(discovery.get("normalized_scope_assets", []) or []))
 
     recommended = _normalize_domain(getattr(getattr(result, "recommendation", None), "domain", "") or "")
     if recommended and recommended not in candidates:
         candidates.append(recommended)
 
     scope_objects = []
-    for domain in in_scope:
-        status = "conflict" if domain in out_scope else "in-scope"
-        scope_objects.append({"type": "domain", "value": domain, "scope_status": status})
-    for domain in out_scope:
-        if domain in in_scope:
-            continue
-        scope_objects.append({"type": "domain", "value": domain, "scope_status": "out-of-scope"})
+    for asset in normalized_scope_assets:
+        scope_objects.append(
+            {
+                "type": asset.get("asset_category") or "unknown",
+                "value": asset.get("value") or "",
+                "scope_status": asset.get("scope_status") or "unknown",
+                "asset_type": asset.get("asset_type") or "UNKNOWN",
+                "host": asset.get("host") or "",
+                "normalized_domains": list(asset.get("normalized_domains", []) or []),
+                "sources": list(asset.get("sources", []) or []),
+            }
+        )
+    if not scope_objects:
+        for domain in in_scope:
+            status = "conflict" if domain in out_scope else "in-scope"
+            scope_objects.append({"type": "domain", "value": domain, "scope_status": status})
+        for domain in out_scope:
+            if domain in in_scope:
+                continue
+            scope_objects.append({"type": "domain", "value": domain, "scope_status": "out-of-scope"})
 
     test_targets = {}
     test_categories = {}
@@ -101,8 +115,10 @@ def _build_adaptive_recon_outputs(layout: SessionLayout, result, program_url: st
 
     state_summary_file = layout.recon_dir / "state_summary.json"
     scope_log_file = layout.recon_dir / "scope_decision_log.json"
+    scope_inventory_file = layout.recon_dir / "normalized_scope_inventory.json"
     state_summary_file.write_text(json.dumps(state_summary, indent=2), encoding="utf-8")
     scope_log_file.write_text(json.dumps(scope_log, indent=2), encoding="utf-8")
+    scope_inventory_file.write_text(json.dumps(normalized_scope_assets, indent=2), encoding="utf-8")
 
     graph_file = None
     queue_csv_file = None
@@ -124,6 +140,7 @@ def _build_adaptive_recon_outputs(layout: SessionLayout, result, program_url: st
     artifacts = {
         "state_summary": str(state_summary_file),
         "scope_decision_log": str(scope_log_file),
+        "normalized_scope_inventory": str(scope_inventory_file),
         "graph": str(graph_file) if graph_file else None,
         "asset_queue_csv": str(queue_csv_file) if queue_csv_file else None,
         "tests_queue": str(tests_queue_file) if tests_queue_file else None,
@@ -133,6 +150,7 @@ def _build_adaptive_recon_outputs(layout: SessionLayout, result, program_url: st
         "tier": tier,
         "artifacts": artifacts,
         "scope_objects": scope_objects,
+        "normalized_scope_assets": normalized_scope_assets,
         "state_summary": state_summary,
         "gates": gates,
     }
@@ -467,6 +485,52 @@ def _collect_domains(values: list[str]) -> list[str]:
         if norm and norm not in domains:
             domains.append(norm)
     return domains
+
+
+def _normalize_scope_assets(values: list[dict]) -> list[dict]:
+    assets = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value") or "").strip()
+        asset_type = str(item.get("asset_type") or "UNKNOWN").strip().upper()
+        scope_status = str(item.get("scope_status") or "unknown").strip().lower()
+        host = _normalize_domain(str(item.get("host") or ""))
+        if not value:
+            continue
+        key = (value, asset_type, scope_status, host)
+        if key in seen:
+            continue
+        seen.add(key)
+        sources = []
+        for source in list(item.get("sources", []) or []):
+            source_text = str(source).strip()
+            if source_text and source_text not in sources:
+                sources.append(source_text)
+        single_source = str(item.get("source") or "").strip()
+        if single_source and single_source not in sources:
+            sources.append(single_source)
+        assets.append(
+            {
+                "value": value,
+                "asset_type": asset_type,
+                "asset_category": str(item.get("asset_category") or "unknown").strip().lower(),
+                "scope_status": scope_status,
+                "sources": sources,
+                "host": host,
+                "normalized_hosts": _collect_domains(list(item.get("normalized_hosts", []) or [])),
+                "normalized_domains": _collect_domains(list(item.get("normalized_domains", []) or [])),
+                "protocol": str(item.get("protocol") or "").strip().lower(),
+                "port": str(item.get("port") or "").strip(),
+                "path": str(item.get("path") or "").strip(),
+                "eligible_for_submission": str(item.get("eligible_for_submission") or "").strip().lower(),
+                "eligible_for_bounty": str(item.get("eligible_for_bounty") or "").strip().lower(),
+                "max_severity": str(item.get("max_severity") or "").strip().lower(),
+                "instruction": str(item.get("instruction") or "").strip(),
+            }
+        )
+    return assets
 
 
 def _normalize_domain(value: str) -> str:
