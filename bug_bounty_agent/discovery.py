@@ -11,9 +11,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
+
+from bug_bounty_agent.lpoint import load_model_weights
 
 TAB_SUFFIXES = [
     "",  # Program guidelines
@@ -85,6 +87,7 @@ class DiscoveryData:
     non_web_in_scope_assets: list[str]
     non_web_out_scope_assets: list[str]
     normalized_scope_assets: list[dict]
+    recon_flow: dict[str, Any]
     sources: list[str]
 
     def as_prompt(self) -> str:
@@ -103,10 +106,267 @@ class DiscoveryData:
             f"Non-web in-scope assets: {self.non_web_in_scope_assets}\n"
             f"Non-web out-of-scope assets: {self.non_web_out_scope_assets}\n"
             f"Normalized scope assets: {self.normalized_scope_assets[:20]}\n"
+            f"Recon flow: {self.recon_flow}\n"
             f"Previous bug links: {self.previous_bug_links}\n"
             f"Social/public discussions: {self.social_discussion_links}\n"
             "Create an actionable bug bounty plan with completed vs pending phases."
         )
+
+
+def _is_high_value_target(target: str) -> bool:
+    low = target.lower()
+    return any(token in low for token in ("api", "auth", "admin", "account", "billing", "pay", "upload"))
+
+
+def _score_target(
+    target: str,
+    in_scope_domains: list[str],
+    out_scope_domains: list[str],
+    candidate_doc_links: list[str],
+    allowed_scope_signals: list[str],
+    previous_bug_links: list[str],
+    normalized_scope_assets: list[dict],
+    model_weights: dict[str, float],
+) -> dict[str, Any]:
+    evidence: list[str] = []
+    confidence = 10
+    exposure = 15
+    priority = 20
+    out = target in out_scope_domains
+    in_scope = target in in_scope_domains
+
+    if in_scope:
+        evidence.append("in_scope_artifact")
+        confidence += 40
+        priority += 20
+    if out:
+        evidence.append("out_of_scope_artifact")
+        confidence = max(0, confidence - 50)
+        priority = 0
+    if _is_high_value_target(target):
+        evidence.append("high_value_token_match")
+        exposure += 35
+        priority += 30
+    if any(target in link.lower() for link in candidate_doc_links):
+        evidence.append("docs_reference")
+        confidence += 8
+        priority += 6
+    if any(target in signal.lower() for signal in allowed_scope_signals):
+        evidence.append("allowed_scope_signal")
+        confidence += 12
+        priority += 8
+    if any(target in link.lower() for link in previous_bug_links):
+        evidence.append("previous_bug_context")
+        exposure += 10
+        priority += 6
+
+    related_assets = 0
+    for asset in normalized_scope_assets:
+        domains = [str(item).lower() for item in asset.get("normalized_domains", [])]
+        if target.lower() in domains:
+            related_assets += 1
+    if related_assets:
+        evidence.append("normalized_scope_assets")
+        confidence += min(18, related_assets * 3)
+        priority += min(15, related_assets * 2)
+
+    features = {
+        "in_scope": 1.0 if in_scope else 0.0,
+        "out_of_scope": 1.0 if out else 0.0,
+        "high_value": 1.0 if _is_high_value_target(target) else 0.0,
+        "docs_reference": 1.0 if "docs_reference" in evidence else 0.0,
+        "allowed_scope_signal": 1.0 if "allowed_scope_signal" in evidence else 0.0,
+        "previous_bug_context": 1.0 if "previous_bug_context" in evidence else 0.0,
+        "related_assets": min(1.0, related_assets / 5.0) if related_assets else 0.0,
+    }
+    ml_logit = float(model_weights.get("ml_bias", 0.0))
+    ml_logit += float(model_weights.get("ml_in_scope", 0.0)) * features["in_scope"]
+    ml_logit += float(model_weights.get("ml_high_value", 0.0)) * features["high_value"]
+    ml_logit += float(model_weights.get("ml_docs", 0.0)) * features["docs_reference"]
+    ml_logit += float(model_weights.get("ml_allowed", 0.0)) * features["allowed_scope_signal"]
+    ml_logit += float(model_weights.get("ml_prev_bug", 0.0)) * features["previous_bug_context"]
+    ml_logit += float(model_weights.get("ml_related_assets", 0.0)) * features["related_assets"]
+    ml_logit += float(model_weights.get("ml_out_scope", 0.0)) * features["out_of_scope"]
+    ml_prob = 1.0 / (1.0 + pow(2.718281828, -ml_logit))
+    ml_adjust = int(round((ml_prob - 0.5) * 24))
+    priority += ml_adjust
+    confidence += int(round(ml_adjust * 0.5))
+    if ml_adjust >= 4:
+        evidence.append("ml_rank_boost")
+    elif ml_adjust <= -4:
+        evidence.append("ml_rank_penalty")
+
+    confidence = min(100, max(0, confidence))
+    exposure = min(100, max(0, exposure))
+    priority = min(100, max(0, priority))
+    if out:
+        exposure = 0
+
+    return {
+        "target": target,
+        "in_scope": in_scope,
+        "out_of_scope": out,
+        "high_value": _is_high_value_target(target),
+        "scores": {
+            "confidence": confidence,
+            "exposure": exposure,
+            "priority": priority,
+            "ml_probability": round(ml_prob, 4),
+        },
+        "features": features,
+        "evidence": evidence,
+    }
+
+
+def _build_recon_flow(
+    *,
+    project_key: str,
+    project_url: str,
+    candidate_policy_links: list[str],
+    candidate_scope_links: list[str],
+    candidate_doc_links: list[str],
+    downloaded_files: list[str],
+    tab_links: list[str],
+    in_scope_domains: list[str],
+    out_scope_domains: list[str],
+    domain_candidates: list[str],
+    allowed_scope_signals: list[str],
+    out_scope_signals: list[str],
+    previous_bug_links: list[str],
+    social_discussion_links: list[str],
+    normalized_scope_assets: list[dict],
+) -> dict[str, Any]:
+    model = load_model_weights(project_key)
+    model_weights = dict(model.get("weights", {}))
+    model_meta = dict(model.get("meta", {}))
+    policy_pass = bool(candidate_policy_links or candidate_scope_links or downloaded_files)
+    scope_pass = bool(in_scope_domains or normalized_scope_assets)
+    policy_gate = {
+        "status": "pass" if (policy_pass and scope_pass) else "partial",
+        "checks": [
+            {"name": "policy_links_present", "ok": bool(candidate_policy_links)},
+            {"name": "scope_links_present", "ok": bool(candidate_scope_links)},
+            {"name": "scope_artifacts_present", "ok": bool(downloaded_files)},
+            {"name": "in_scope_assets_present", "ok": bool(in_scope_domains or normalized_scope_assets)},
+        ],
+    }
+
+    collection = {
+        "searching_platform": {
+            "policy_links": len(candidate_policy_links),
+            "scope_links": len(candidate_scope_links),
+            "tab_links": len(tab_links),
+        },
+        "files_on_platform": {"downloaded_artifacts": len(downloaded_files)},
+        "available_internet_info": {
+            "docs_links": len(candidate_doc_links),
+            "previous_bug_links": len(previous_bug_links),
+        },
+        "social_platform_discussions": {
+            "social_links": len(social_discussion_links),
+        },
+    }
+
+    unique_candidates: list[str] = []
+    for item in domain_candidates + in_scope_domains:
+        if item and item not in unique_candidates and item not in {"hackerone.com", "www.hackerone.com"}:
+            unique_candidates.append(item)
+    in_scope_unique = [d for d in unique_candidates if d in in_scope_domains and d not in out_scope_domains]
+    normalization = {
+        "candidate_domains_raw": len(domain_candidates),
+        "candidate_domains_deduplicated": len(unique_candidates),
+        "normalized_scope_assets": len(normalized_scope_assets),
+        "in_scope_domains_deduplicated": len(in_scope_unique),
+        "out_scope_domains_deduplicated": len(set(out_scope_domains)),
+        "allowed_scope_signals": len(allowed_scope_signals),
+        "out_scope_signals": len(out_scope_signals),
+    }
+
+    scored = [
+        _score_target(
+            target=target,
+            in_scope_domains=in_scope_domains,
+            out_scope_domains=out_scope_domains,
+            candidate_doc_links=candidate_doc_links,
+            allowed_scope_signals=allowed_scope_signals,
+            previous_bug_links=previous_bug_links,
+            normalized_scope_assets=normalized_scope_assets,
+            model_weights=model_weights,
+        )
+        for target in unique_candidates
+    ]
+    scored.sort(
+        key=lambda item: (
+            item["out_of_scope"],
+            -int(item["scores"]["priority"]),
+            -int(item["scores"]["confidence"]),
+            item["target"],
+        )
+    )
+    prioritized_targets = [item for item in scored if not item["out_of_scope"]][:20]
+    prioritization = {
+        "total_candidates_scored": len(scored),
+        "high_value_candidates": sum(1 for item in scored if item["high_value"] and not item["out_of_scope"]),
+        "top_targets": prioritized_targets[:10],
+    }
+
+    safe_validation = {
+        "mode": "non_destructive_only",
+        "guardrails": [
+            "in_scope_only",
+            "respect_program_rate_limits",
+            "no_auth_bypass_or_dos",
+            "evidence_capture_required",
+        ],
+        "target_count": len(prioritized_targets[:10]),
+    }
+    test_queue = [
+        {
+            "target": item["target"],
+            "priority": item["scores"]["priority"],
+            "confidence": item["scores"]["confidence"],
+            "reason": ", ".join(item["evidence"][:3]) or "scored_candidate",
+        }
+        for item in prioritized_targets[:10]
+    ]
+    deliverables = {
+        "prioritized_target_list": len(prioritized_targets),
+        "test_queue_items": len(test_queue),
+        "report_ready_evidence": {
+            "policy_sources": len(candidate_policy_links) + len(candidate_scope_links),
+            "scope_artifacts": len(downloaded_files),
+            "internet_context_links": len(candidate_doc_links) + len(previous_bug_links),
+            "social_context_links": len(social_discussion_links),
+        },
+    }
+
+    return {
+        "pipeline_version": "bugbounty-recon-v2",
+        "project_url": project_url,
+        "model": {
+            "source": model_meta.get("source"),
+            "version": model_meta.get("version"),
+            "sample_count": model_meta.get("sample_count"),
+            "updated_at": model_meta.get("updated_at"),
+            "db_path": model.get("db_path"),
+        },
+        "stages": {
+            "scope_policy_check": policy_gate,
+            "recon_collection": collection,
+            "normalize_correlate": normalization,
+            "prioritize": prioritization,
+            "safe_validation": safe_validation,
+            "deliverables": deliverables,
+            "learning_point": {
+                "enabled": True,
+                "mode": "online_learning",
+                "training_source": "automated_findings_status",
+            },
+        },
+        "prioritized_targets": prioritized_targets,
+        "scored_targets": scored[:100],
+        "test_queue": test_queue,
+    }
 
 
 def _fetch(url: str, timeout: int = 12) -> str:
@@ -913,7 +1173,7 @@ def discover_project_context(
     _progress(progress_hook, 80, "Searching prior bug reports and social context")
     previous_bugs = _search_previous_bugs(project_url)
     social_links = _search_social_discussions(project_url)
-    _progress(progress_hook, 90, "Merging sources and extracting candidate targets")
+    _progress(progress_hook, 90, "Merging sources, normalizing data, and ranking targets")
     domain_candidates = _extract_domains_from_text(page_text + " " + " ".join(links))
     for d in in_scope_domains:
         if d not in domain_candidates:
@@ -936,6 +1196,24 @@ def discover_project_context(
         if source and source not in seen:
             seen.add(source)
             uniq_sources.append(source)
+    merged_scope_assets = _merge_scope_assets(normalized_scope_assets)[:250]
+    recon_flow = _build_recon_flow(
+        project_key=project_key,
+        project_url=project_url,
+        candidate_policy_links=policy,
+        candidate_scope_links=scope,
+        candidate_doc_links=docs,
+        downloaded_files=downloaded_files,
+        tab_links=tab_links,
+        in_scope_domains=in_scope_domains,
+        out_scope_domains=out_scope_domains,
+        domain_candidates=domain_candidates,
+        allowed_scope_signals=allowed_scope_signals,
+        out_scope_signals=out_scope_signals,
+        previous_bug_links=previous_bugs,
+        social_discussion_links=social_links,
+        normalized_scope_assets=merged_scope_assets,
+    )
     _progress(progress_hook, 95, "Discovery complete")
 
     return DiscoveryData(
@@ -958,6 +1236,7 @@ def discover_project_context(
         out_scope_signals=out_scope_signals[:60],
         non_web_in_scope_assets=non_web_in_scope_assets[:60],
         non_web_out_scope_assets=non_web_out_scope_assets[:60],
-        normalized_scope_assets=_merge_scope_assets(normalized_scope_assets)[:250],
+        normalized_scope_assets=merged_scope_assets,
+        recon_flow=recon_flow,
         sources=uniq_sources[:20],
     )

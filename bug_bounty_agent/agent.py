@@ -14,6 +14,7 @@ from bug_bounty_agent.analysis import TestCase, analyze_information
 from bug_bounty_agent.automation import AutomatedFinding, run_automated_tests
 from bug_bounty_agent.discovery import discover_project_context
 from bug_bounty_agent.learning import LearningStore
+from bug_bounty_agent.lpoint import record_lpoint_cycle
 from bug_bounty_agent.planner import build_checklist, build_plan
 from bug_bounty_agent.report import ReportData, write_intake_report
 from bug_bounty_agent.scope import (
@@ -230,6 +231,9 @@ class BugBountyAgent:
         notes.append(
             "Step 2 recommendation generated from checklist/discovery + parsed scope patterns."
         )
+        pipeline_version = str(discovery.recon_flow.get("pipeline_version", "unknown"))
+        top_targets = len(discovery.recon_flow.get("prioritized_targets", []))
+        notes.append(f"Recon pipeline active: {pipeline_version} (prioritized targets: {top_targets}).")
         idea_prompt = (
             f"Project: {discovery.project_key}\n"
             f"In-scope domains: {discovery.in_scope_domains}\n"
@@ -260,6 +264,39 @@ class BugBountyAgent:
             notes.extend(automated.notes)
         else:
             notes.append("Automated checks skipped (use --run-automated test).")
+
+        learning_update = record_lpoint_cycle(
+            operator_id=data.operator_id,
+            project_key=discovery.project_key,
+            program_url=data.program_url,
+            mode=data.mode,
+            recon_flow=discovery.recon_flow,
+            tests_generated=len(analysis.tests),
+            automated_findings=automated.findings if automated else [],
+        )
+        if learning_update.get("labeled_samples", 0) > 0:
+            notes.append(
+                "L-point model updated: "
+                f"v{learning_update.get('model_version_before', 0)} -> "
+                f"v{learning_update.get('model_version_after', 0)} "
+                f"using {learning_update.get('labeled_samples', 0)} labeled samples."
+            )
+        else:
+            notes.append("L-point model update skipped: no labeled outcomes captured this run.")
+        notes.append(f"L-point DB: {learning_update.get('db_path')}")
+        try:
+            discovery.recon_flow.setdefault("stages", {})["learning_point"] = {
+                "enabled": True,
+                "mode": "online_learning",
+                "db_path": learning_update.get("db_path"),
+                "run_id": learning_update.get("run_id"),
+                "labeled_samples": learning_update.get("labeled_samples", 0),
+                "model_version_before": learning_update.get("model_version_before", 0),
+                "model_version_after": learning_update.get("model_version_after", 0),
+                "sample_count_after": learning_update.get("sample_count_after", 0),
+            }
+        except Exception:
+            pass
 
         rationale = [
             f"In-scope domains parsed: {len(discovery.in_scope_domains)}",
@@ -319,6 +356,7 @@ class BugBountyAgent:
                 "non_web_in_scope_assets": list(discovery.non_web_in_scope_assets),
                 "non_web_out_scope_assets": list(discovery.non_web_out_scope_assets),
                 "normalized_scope_assets": list(discovery.normalized_scope_assets),
+                "recon_flow": dict(discovery.recon_flow),
                 "sources": list(discovery.sources),
                 "downloaded_files": list(discovery.downloaded_files),
             },

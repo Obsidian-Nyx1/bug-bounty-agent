@@ -80,6 +80,21 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
     else:
         pending.append("Out-of-scope restrictions not found in accessible content")
 
+    stages = discovery.recon_flow.get("stages", {})
+    scope_stage = stages.get("scope_policy_check", {})
+    if scope_stage.get("status") == "pass":
+        completed.append("Recon Stage 1 complete: Scope & policy checks passed")
+    else:
+        pending.append("Recon Stage 1 partial: strengthen scope/policy evidence before active testing")
+    if stages.get("prioritize", {}).get("top_targets"):
+        completed.append("Recon Stage 4 complete: Prioritized target queue generated")
+    else:
+        pending.append("Recon Stage 4 incomplete: no ranked in-scope targets generated")
+    if stages.get("safe_validation", {}).get("guardrails"):
+        completed.append("Recon Stage 5 complete: Safe validation guardrails attached")
+    else:
+        pending.append("Recon Stage 5 incomplete: no safety guardrails captured")
+
     pending.extend(
         [
             "Validate all discovered links manually",
@@ -92,9 +107,11 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
 
 
 def build_plan(discovery: DiscoveryData, ai_summary: str | None) -> Plan:
+    stages = discovery.recon_flow.get("stages", {})
+    top_targets = stages.get("prioritize", {}).get("top_targets", [])
     summary = (
         f"Project intake complete for {discovery.project_key}. "
-        "Collected candidate scope/policy/docs, prior bug context, social signals, and domains."
+        "Executed bug bounty recon pipeline: scope checks, collection, normalization, prioritization, and safe-validation prep."
     )
     if not (
         discovery.candidate_policy_links
@@ -108,12 +125,14 @@ def build_plan(discovery: DiscoveryData, ai_summary: str | None) -> Plan:
         )
     if ai_summary:
         summary = f"{summary} AI model insight: {ai_summary}"
+    if top_targets:
+        summary = f"{summary} Ranked targets ready: {len(top_targets)}."
 
     next_actions = [
         "Confirm policy and scope URLs before any active testing.",
-        "Create in-scope and out-of-scope lists from verified sources.",
-        "Map high-value assets (auth, APIs, uploads, payment, admin).",
-        "Launch recon pipeline only against approved assets.",
+        "Freeze approved in-scope and out-of-scope asset list from extracted artifacts.",
+        "Start with top-ranked high-value targets (auth, APIs, uploads, payment, admin).",
+        "Run non-destructive validation only, with strict rate limits.",
         "Track findings in reproducible checklist format.",
     ]
 

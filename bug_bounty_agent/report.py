@@ -116,6 +116,47 @@ def write_intake_report(data: ReportData) -> Path:
     lines.append("### Domain Candidates")
     lines.extend(_as_bullets(data.discovery.domain_candidates))
     lines.append("")
+    lines.append("## Bug Bounty Recon Pipeline")
+    recon_flow = data.discovery.recon_flow or {}
+    stages = recon_flow.get("stages", {})
+    lines.append(f"- Pipeline version: {recon_flow.get('pipeline_version', 'unknown')}")
+    scope_stage = stages.get("scope_policy_check", {})
+    lines.append(f"- Scope/policy stage status: {scope_stage.get('status', 'unknown')}")
+    lines.append("### Scope/Policy Checks")
+    for check in scope_stage.get("checks", []):
+        name = str(check.get("name", "unknown"))
+        ok = bool(check.get("ok", False))
+        lines.append(f"- {name}: {'pass' if ok else 'fail'}")
+    lines.append("### Prioritized Targets (Top 10)")
+    top_targets = stages.get("prioritize", {}).get("top_targets", [])
+    if top_targets:
+        lines.append("| Target | Priority | Confidence | Exposure | Evidence |")
+        lines.append("|---|---|---|---|---|")
+        for target in top_targets[:10]:
+            scores = target.get("scores", {}) if isinstance(target, dict) else {}
+            evidence = ", ".join((target.get("evidence") or [])[:3]) if isinstance(target, dict) else ""
+            lines.append(
+                f"| {target.get('target', 'unknown')} | {scores.get('priority', 0)} | "
+                f"{scores.get('confidence', 0)} | {scores.get('exposure', 0)} | {evidence or 'n/a'} |"
+            )
+    else:
+        lines.append("- None found in this run.")
+    lines.append("### Safe Validation Guardrails")
+    lines.extend(_as_bullets(stages.get("safe_validation", {}).get("guardrails", [])))
+    lines.append("### L-Point Learning")
+    model = recon_flow.get("model", {})
+    learning_stage = stages.get("learning_point", {})
+    lines.append(f"- Model source: {model.get('source', 'unknown')}")
+    lines.append(f"- Model version: {model.get('version', 'n/a')}")
+    lines.append(f"- Model samples: {model.get('sample_count', 0)}")
+    lines.append(f"- Model DB: {model.get('db_path', learning_stage.get('db_path', 'n/a'))}")
+    if learning_stage:
+        lines.append(
+            f"- Last update: v{learning_stage.get('model_version_before', 0)} -> "
+            f"v{learning_stage.get('model_version_after', 0)} "
+            f"(samples={learning_stage.get('labeled_samples', 0)})"
+        )
+    lines.append("")
 
     lines.append("## Checklist")
     for item in data.completed:
