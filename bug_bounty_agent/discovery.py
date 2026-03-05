@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import csv
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 import re
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -503,6 +505,105 @@ def _download_file_with_curl(url: str, target_dir: Path) -> str | None:
         out_file = target_dir / filename
         out_file.write_bytes(body_path.read_bytes())
         return str(out_file)
+
+
+def _artifact_meta_file(download_dir: Path) -> Path:
+    return download_dir / "artifact_meta.json"
+
+
+def _load_artifact_meta(download_dir: Path) -> dict[str, dict]:
+    path = _artifact_meta_file(download_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_artifact_meta(download_dir: Path, data: dict[str, dict]) -> None:
+    path = _artifact_meta_file(download_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1_048_576)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def _head_headers(url: str, timeout: int = 10) -> dict[str, str]:
+    req = Request(
+        url=url,
+        method="HEAD",
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0 Safari/537.36"
+            )
+        },
+    )
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            return {
+                "etag": str(response.headers.get("ETag", "") or "").strip(),
+                "last_modified": str(response.headers.get("Last-Modified", "") or "").strip(),
+                "content_length": str(response.headers.get("Content-Length", "") or "").strip(),
+                "content_type": str(response.headers.get("Content-Type", "") or "").strip(),
+            }
+    except Exception:
+        return {}
+
+
+def _resolve_artifact(
+    *,
+    url: str,
+    download_dir: Path,
+    cache_pattern: str,
+    reason_label: str,
+) -> tuple[str | None, str | None]:
+    meta_all = _load_artifact_meta(download_dir)
+    meta = meta_all.get(url, {}) if isinstance(meta_all.get(url, {}), dict) else {}
+    cached = _find_cached_artifact(download_dir, cache_pattern)
+    head = _head_headers(url)
+
+    if cached and head:
+        same_etag = bool(meta.get("etag")) and str(meta.get("etag")) == str(head.get("etag"))
+        same_last = bool(meta.get("last_modified")) and str(meta.get("last_modified")) == str(head.get("last_modified"))
+        same_len = bool(head.get("content_length")) and str(head.get("content_length")) == str(Path(cached).stat().st_size)
+        if same_etag or same_last or same_len:
+            return cached, f"{cached} <- {url} ({reason_label}; cached not modified)"
+
+    downloaded = _download_file(url, download_dir)
+    if downloaded:
+        path = Path(downloaded)
+        meta_all[url] = {
+            "path": downloaded,
+            "etag": str(head.get("etag", "") or ""),
+            "last_modified": str(head.get("last_modified", "") or ""),
+            "content_length": str(path.stat().st_size),
+            "content_type": str(head.get("content_type", "") or ""),
+            "sha256": _sha256_file(path),
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_artifact_meta(download_dir, meta_all)
+        source_hint = "updated download" if cached else "fresh download"
+        return downloaded, f"{downloaded} <- {url} ({reason_label}; {source_hint})"
+
+    if cached:
+        return cached, f"{cached} <- {url} ({reason_label}; cached fallback)"
+    return None, None
 
 
 def _classify_links(links: list[str]) -> tuple[list[str], list[str], list[str]]:
@@ -1067,36 +1168,28 @@ def discover_project_context(
         tab_links = [base if not suf else f"{base}/{suf}" for suf in TAB_SUFFIXES]
         download_dir = Path(".bug_bounty_agent/downloads") / project_key
         _progress(progress_hook, 34, "Downloading scope CSV artifact")
-        csv_file = _download_file(
-            f"https://hackerone.com/teams/{handle}/assets/download_csv.csv",
-            download_dir,
+        csv_url = f"https://hackerone.com/teams/{handle}/assets/download_csv.csv"
+        csv_file, csv_reason = _resolve_artifact(
+            url=csv_url,
+            download_dir=download_dir,
+            cache_pattern=f"scopes_for_{handle}_*.csv",
+            reason_label="scope inventory",
         )
-        csv_from_cache = False
-        if not csv_file:
-            csv_file = _find_cached_artifact(download_dir, f"scopes_for_{handle}_*.csv")
-            csv_from_cache = bool(csv_file)
         _progress(progress_hook, 40, "Downloading Burp scope JSON artifact")
-        burp_file = _download_file(
-            f"https://hackerone.com/teams/{handle}/assets/download_burp_project_file.json",
-            download_dir,
+        burp_url = f"https://hackerone.com/teams/{handle}/assets/download_burp_project_file.json"
+        burp_file, burp_reason = _resolve_artifact(
+            url=burp_url,
+            download_dir=download_dir,
+            cache_pattern=f"{handle}-*.json",
+            reason_label="include/exclude scope rules",
         )
-        burp_from_cache = False
-        if not burp_file:
-            burp_file = _find_cached_artifact(download_dir, f"{handle}-*.json")
-            burp_from_cache = bool(burp_file)
         for path in [csv_file, burp_file]:
             if path:
                 downloaded_files.append(path)
-                if path == csv_file:
-                    suffix = " (cached fallback)" if csv_from_cache else ""
-                    downloaded_artifact_reasons.append(
-                        f"{path} <- teams/{handle}/assets/download_csv.csv (scope inventory{suffix})"
-                    )
-                if path == burp_file:
-                    suffix = " (cached fallback)" if burp_from_cache else ""
-                    downloaded_artifact_reasons.append(
-                        f"{path} <- teams/{handle}/assets/download_burp_project_file.json (include/exclude scope rules{suffix})"
-                    )
+                if path == csv_file and csv_reason:
+                    downloaded_artifact_reasons.append(csv_reason)
+                if path == burp_file and burp_reason:
+                    downloaded_artifact_reasons.append(burp_reason)
 
         if csv_file:
             _progress(progress_hook, 48, "Parsing CSV scope artifact")
