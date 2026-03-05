@@ -302,7 +302,7 @@ def _run_afrog_safe_step(
     afrog_bin = ensure_afrog_installed()
     if not afrog_bin:
         print(_color("[Error] afrog is not installed and auto-install failed.", RED, bold=True))
-        print(_color("Install manually: go install github.com/zan8in/afrog/v3/cmd/afrog@latest", YELLOW, bold=True))
+        print(_color("Install via command: go install github.com/zan8in/afrog/v3/cmd/afrog@latest", YELLOW, bold=True))
         return 1
 
     targets, skipped, sources = collect_approved_targets(result)
@@ -642,7 +642,7 @@ def _render_recon(result) -> None:
     for item in result.completed:
         checklist_rows.append([_color("DONE", GREEN, bold=True), item])
     for item in result.pending:
-        checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
+        checklist_rows.append([_color("PENDING", YELLOW, bold=True), item])
     _print_table(["Status", "Task"], checklist_rows)
 
 
@@ -704,7 +704,7 @@ def _render_step_3(result) -> None:
     for item in result.completed:
         checklist_rows.append([_color("DONE", GREEN, bold=True), item])
     for item in result.pending:
-        checklist_rows.append([_color("TODO", YELLOW, bold=True), item])
+        checklist_rows.append([_color("PENDING", YELLOW, bold=True), item])
     _print_table(["Status", "Task"], checklist_rows)
 
     _print_section("3) Scope Labels Guide")
@@ -1164,7 +1164,7 @@ def main() -> int:
         _print_section("Runtime Dependencies")
         _print_table(["Status", "Details"], [[("OK" if deps.ok else "WARN"), note] for note in deps.notes])
     if not deps.ok:
-        print(_color("[Error] Missing required runtime dependencies. Re-run with network access or install manually.", RED, bold=True))
+        print(_color("[Error] Missing required runtime dependencies. Re-run with network access or install via command.", RED, bold=True))
         return 1
 
     # Optional dependencies (like selenium) should not block execution.

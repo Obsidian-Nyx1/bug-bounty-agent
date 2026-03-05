@@ -61,7 +61,7 @@ class AgentResult:
 
 
 class BugBountyAgent:
-    """Execute when possible, otherwise provide a clear manual path."""
+    """Execute when possible, otherwise provide a clear automated fallback path."""
 
     def run(self, data: AgentInput) -> AgentResult:
         self._progress(data, 4, "Validating input")
@@ -77,7 +77,7 @@ class BugBountyAgent:
                 suggestions.append(f"Resume with last target: ./bug_bounty --program-url {last_url}")
                 notes.append(f"Respawn point found for operator '{data.operator_id}'.")
             return AgentResult(
-                status="manual_required",
+                status="input_required",
                 summary="Missing project URL.",
                 suggestions=suggestions,
                 completed=[],
@@ -110,7 +110,7 @@ class BugBountyAgent:
         url_error = self._validate_project_url(data.program_url)
         if url_error:
             return AgentResult(
-                status="manual_required",
+                status="input_required",
                 summary=f"Security precheck failed: {url_error}",
                 suggestions=[
                     "Use a valid public HTTPS program URL.",

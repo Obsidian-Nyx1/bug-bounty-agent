@@ -207,7 +207,7 @@ def recommend_domain(
     return DomainRecommendation(
         domain=best_domain,
         status=best_status,
-        reason="Domain does not match explicit in-scope/out-of-scope patterns; manual validation required.",
+        reason="Domain does not match explicit in-scope/out-of-scope patterns; automated scope validation pending.",
         allowed_tests=[
             "Limit to passive recon until scope is confirmed",
             "Confirm scope entry before active testing",

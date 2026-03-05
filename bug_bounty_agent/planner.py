@@ -101,7 +101,7 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
 
     pending.extend(
         [
-            "Validate all discovered links manually",
+            "Run automated source integrity checks for discovered links",
             "Build definitive in-scope asset list",
             "Start recon and testing against validated in-scope assets",
             "Collect evidence and draft report templates",
@@ -141,8 +141,8 @@ def build_plan(discovery: DiscoveryData, ai_summary: str | None) -> Plan:
     ]
 
     if not discovery.candidate_policy_links:
-        next_actions.insert(0, "Manually locate policy/guidelines page from the program portal.")
+        next_actions.insert(0, "Run expanded automated policy/guideline discovery against program portal routes.")
     if not discovery.candidate_scope_links:
-        next_actions.insert(0, "Manually locate scope page/assets tab from the program portal.")
+        next_actions.insert(0, "Run expanded automated scope/assets discovery against program portal routes.")
 
     return Plan(summary=summary, next_actions=next_actions[:8])
