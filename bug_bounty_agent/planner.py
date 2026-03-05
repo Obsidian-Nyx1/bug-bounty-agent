@@ -54,6 +54,10 @@ def build_checklist(discovery: DiscoveryData) -> tuple[list[str], list[str]]:
         completed.append("Public social discussion links discovered")
     else:
         pending.append("Public social discussion links not discovered yet")
+    if discovery.internet_intel_links:
+        completed.append("Passive internet/social intel pipeline produced ranked evidence links")
+    else:
+        pending.append("Passive internet/social intel pipeline did not return usable links")
 
     if discovery.domain_candidates:
         completed.append("Candidate in-scope domains extracted")

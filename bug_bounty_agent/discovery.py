@@ -17,6 +17,7 @@ from typing import Any, Callable
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
+from bug_bounty_agent.intel_pipeline import run_intel_pipeline
 from bug_bounty_agent.lpoint import load_model_weights
 
 TAB_SUFFIXES = [
@@ -89,6 +90,8 @@ class DiscoveryData:
     non_web_in_scope_assets: list[str]
     non_web_out_scope_assets: list[str]
     normalized_scope_assets: list[dict]
+    internet_intel_links: list[str]
+    internet_intel_items: list[dict]
     recon_flow: dict[str, Any]
     sources: list[str]
 
@@ -108,6 +111,8 @@ class DiscoveryData:
             f"Non-web in-scope assets: {self.non_web_in_scope_assets}\n"
             f"Non-web out-of-scope assets: {self.non_web_out_scope_assets}\n"
             f"Normalized scope assets: {self.normalized_scope_assets[:20]}\n"
+            f"Internet intel links: {self.internet_intel_links[:20]}\n"
+            f"Internet intel items: {self.internet_intel_items[:10]}\n"
             f"Recon flow: {self.recon_flow}\n"
             f"Previous bug links: {self.previous_bug_links}\n"
             f"Social/public discussions: {self.social_discussion_links}\n"
@@ -237,6 +242,8 @@ def _build_recon_flow(
     previous_bug_links: list[str],
     social_discussion_links: list[str],
     normalized_scope_assets: list[dict],
+    internet_intel_links: list[str],
+    internet_intel_items: list[dict],
 ) -> dict[str, Any]:
     model = load_model_weights(project_key)
     model_weights = dict(model.get("weights", {}))
@@ -263,6 +270,7 @@ def _build_recon_flow(
         "available_internet_info": {
             "docs_links": len(candidate_doc_links),
             "previous_bug_links": len(previous_bug_links),
+            "intel_links": len(internet_intel_links),
         },
         "social_platform_discussions": {
             "social_links": len(social_discussion_links),
@@ -337,7 +345,7 @@ def _build_recon_flow(
         "report_ready_evidence": {
             "policy_sources": len(candidate_policy_links) + len(candidate_scope_links),
             "scope_artifacts": len(downloaded_files),
-            "internet_context_links": len(candidate_doc_links) + len(previous_bug_links),
+            "internet_context_links": len(candidate_doc_links) + len(previous_bug_links) + len(internet_intel_links),
             "social_context_links": len(social_discussion_links),
         },
     }
@@ -367,6 +375,7 @@ def _build_recon_flow(
         },
         "prioritized_targets": prioritized_targets,
         "scored_targets": scored[:100],
+        "intel_items": internet_intel_items[:30],
         "test_queue": test_queue,
     }
 
@@ -1266,6 +1275,27 @@ def discover_project_context(
     _progress(progress_hook, 80, "Searching prior bug reports and social context")
     previous_bugs = _search_previous_bugs(project_url)
     social_links = _search_social_discussions(project_url)
+    _progress(progress_hook, 86, "Collecting passive internet/social intel")
+    early_domain_candidates = _extract_domains_from_text(page_text + " " + " ".join(links))
+    intel_seed_domains = list(in_scope_domains) + list(early_domain_candidates)
+    if parsed.hostname:
+        intel_seed_domains.append(parsed.hostname.lower())
+    intel = run_intel_pipeline(
+        project_url=project_url,
+        project_key=project_key,
+        domains=intel_seed_domains,
+        program_hint=program_hint,
+        max_items=50,
+    )
+    internet_intel_links = list(intel.links)
+    internet_intel_items = list(intel.items)
+    for link in internet_intel_links:
+        if "reddit.com" in link or "x.com" in link or "twitter.com" in link:
+            if link not in social_links:
+                social_links.append(link)
+        if "hackerone.com" in link:
+            if link not in previous_bugs:
+                previous_bugs.append(link)
     _progress(progress_hook, 90, "Merging sources, normalizing data, and ranking targets")
     domain_candidates = _extract_domains_from_text(page_text + " " + " ".join(links))
     for d in in_scope_domains:
@@ -1282,6 +1312,7 @@ def discover_project_context(
         *downloaded_files,
         *previous_bugs,
         *social_links,
+        *internet_intel_links,
     ]
     uniq_sources: list[str] = []
     seen: set[str] = set()
@@ -1306,6 +1337,8 @@ def discover_project_context(
         previous_bug_links=previous_bugs,
         social_discussion_links=social_links,
         normalized_scope_assets=merged_scope_assets,
+        internet_intel_links=internet_intel_links,
+        internet_intel_items=internet_intel_items,
     )
     _progress(progress_hook, 95, "Discovery complete")
 
@@ -1330,6 +1363,8 @@ def discover_project_context(
         non_web_in_scope_assets=non_web_in_scope_assets[:60],
         non_web_out_scope_assets=non_web_out_scope_assets[:60],
         normalized_scope_assets=merged_scope_assets,
+        internet_intel_links=internet_intel_links[:80],
+        internet_intel_items=internet_intel_items[:80],
         recon_flow=recon_flow,
         sources=uniq_sources[:20],
     )

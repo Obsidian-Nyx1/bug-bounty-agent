@@ -113,6 +113,20 @@ def write_intake_report(data: ReportData) -> Path:
     lines.extend(_as_bullets(data.discovery.previous_bug_links))
     lines.append("### Social Discussion Links (Public)")
     lines.extend(_as_bullets(data.discovery.social_discussion_links))
+    lines.append("### Internet Intel Links (Passive)")
+    lines.extend(_as_bullets(data.discovery.internet_intel_links))
+    lines.append("### Internet Intel Items (Top 15)")
+    intel_items = list(data.discovery.internet_intel_items or [])
+    if intel_items:
+        lines.append("| Source | Score | URL | Query |")
+        lines.append("|---|---|---|---|")
+        for item in intel_items[:15]:
+            lines.append(
+                f"| {item.get('source_type', 'web')} | {item.get('combined_score', 0)} | "
+                f"{item.get('url', '')} | {item.get('query', '')} |"
+            )
+    else:
+        lines.append("- None found in this run.")
     lines.append("### Domain Candidates")
     lines.extend(_as_bullets(data.discovery.domain_candidates))
     lines.append("")

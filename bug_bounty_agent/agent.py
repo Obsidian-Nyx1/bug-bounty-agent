@@ -356,6 +356,8 @@ class BugBountyAgent:
                 "non_web_in_scope_assets": list(discovery.non_web_in_scope_assets),
                 "non_web_out_scope_assets": list(discovery.non_web_out_scope_assets),
                 "normalized_scope_assets": list(discovery.normalized_scope_assets),
+                "internet_intel_links": list(discovery.internet_intel_links),
+                "internet_intel_items": list(discovery.internet_intel_items),
                 "recon_flow": dict(discovery.recon_flow),
                 "sources": list(discovery.sources),
                 "downloaded_files": list(discovery.downloaded_files),
